@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { User } from "@prisma/client";
+import { UPI_VPA_MESSAGE, UPI_VPA_REGEX } from "../../../common/upi.js";
 
 export const publicUserSchema = z.object({
   id: z.string().uuid(),
@@ -10,6 +11,7 @@ export const publicUserSchema = z.object({
   isActive: z.boolean(),
   referralCode: z.string().nullable(),
   hasAppliedReferral: z.boolean(),
+  upiId: z.string().nullable(),
   createdAt: z.string().datetime(),
 });
 
@@ -24,6 +26,7 @@ export const toPublicUser = (user: User): PublicUser => ({
   isActive: user.isActive,
   referralCode: user.referralCode,
   hasAppliedReferral: user.referredById !== null,
+  upiId: user.upiId,
   createdAt: user.createdAt.toISOString(),
 });
 
@@ -39,6 +42,8 @@ export interface ProgressDto {
 export const updateProfileSchema = z.object({
   name: z.string().min(1).max(120).optional(),
   avatarUrl: z.string().url().nullable().optional(),
+  /** Saved UPI VPA for coin payouts; null clears it. */
+  upiId: z.string().trim().regex(UPI_VPA_REGEX, UPI_VPA_MESSAGE).nullable().optional(),
 });
 
 export type UpdateProfileInput = z.infer<typeof updateProfileSchema>;

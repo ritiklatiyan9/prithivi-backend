@@ -99,6 +99,7 @@ export class UsersService {
     const updated = await this.users.update(userId, {
       ...(input.name !== undefined ? { name: input.name } : {}),
       ...(input.avatarUrl !== undefined ? { avatarUrl: input.avatarUrl } : {}),
+      ...(input.upiId !== undefined ? { upiId: input.upiId } : {}),
     });
     return toPublicUser(updated);
   }

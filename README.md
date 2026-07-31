@@ -25,21 +25,57 @@ npm run dev
 - Swagger docs: `http://localhost:4000/docs`
 - Health check: `GET /api/v1/health`
 
-Production: `npm run build && npm run prisma:deploy && npm start`.
+Production: `npm run build && npm start` (the `prestart` hook now runs `npm run prisma:deploy` automatically).
+
+### Quick DB repair (P3009 failed migration)
+
+If deployment shows `P3009` / failed migration, run:
+
+```bash
+npm run prisma:fix-db
+```
+
+The command above automatically reads `DATABASE_URL_UNPOOLED` or `DATABASE_URL`
+from the backend `.env`. You can override it when needed:
+
+```bash
+npm run prisma:fix-db -- --db-url "postgresql://<user>:<password>@<host>/<db>?sslmode=require"
+```
+
+or with environment:
+
+```bash
+DATABASE_URL_UNPOOLED="postgresql://<user>:<password>@<host>/<db>?sslmode=require&channel_binding=require" \
+  npm run prisma:fix-db
+```
+
+Use the exact URL copied from Neon; do not leave `<user>`, `<password>`, or `...`
+in the command. The script supports both Neon pooled and direct URLs. For the
+pooler URL, it disables Prisma's advisory migration lock, so do not run two
+database deployments at the same time.
+
+This script:
+
+1. Checks the failed migration state.
+2. Applies missing `offers` columns (`isProduct`, `brandLogoUrl`) if absent.
+3. Marks `20260713080000_add_offer_product_fields` as applied when needed.
+4. Verifies and repairs the previously created Roulette base schema when needed.
+5. Runs `prisma migrate deploy`.
+6. Verifies `public.coin_purchases` exists.
 
 ## Environment variables
 
 See [.env.example](.env.example). Key ones:
 
-| Variable | Purpose |
-|---|---|
-| `DATABASE_URL` | PostgreSQL connection string |
-| `REDIS_URL` | Redis connection string (BullMQ + caching) |
-| `JWT_SECRET` | Signing key for access tokens |
-| `JWT_ACCESS_EXPIRES_IN` / `JWT_REFRESH_EXPIRES_IN` | Token lifetimes (`15m`, `7d`) |
-| `FIREBASE_SERVICE_ACCOUNT` / `FIREBASE_PROJECT_ID` | Firebase Admin authentication |
-| `XOXODAY_*` | Plum Reward Link credentials, campaign and token refresh |
-| `ADMIN_EMAIL` | Email seeded as SUPER_ADMIN |
+| Variable                                           | Purpose                                                  |
+| -------------------------------------------------- | -------------------------------------------------------- |
+| `DATABASE_URL`                                     | PostgreSQL connection string                             |
+| `REDIS_URL`                                        | Redis connection string (BullMQ + caching)               |
+| `JWT_SECRET`                                       | Signing key for access tokens                            |
+| `JWT_ACCESS_EXPIRES_IN` / `JWT_REFRESH_EXPIRES_IN` | Token lifetimes (`15m`, `7d`)                            |
+| `FIREBASE_SERVICE_ACCOUNT` / `FIREBASE_PROJECT_ID` | Firebase Admin authentication                            |
+| `XOXODAY_*`                                        | Plum Reward Link credentials, campaign and token refresh |
+| `ADMIN_EMAIL`                                      | Email seeded as SUPER_ADMIN                              |
 
 ## Authentication
 
@@ -65,16 +101,16 @@ Roles: `USER`, `ADMIN`, `SUPER_ADMIN`. Admin routes require `ADMIN`+; only a `SU
 
 ## API overview
 
-| Area | Endpoints |
-|---|---|
-| Auth | `POST /auth/google`, `GET /auth/google/callback`, `POST /auth/refresh`, `POST /auth/logout`, `POST /auth/logout-all`, `GET /auth/me` |
-| Users | `GET /users/me`, `PATCH /users/me` |
-| Campaigns | `GET /campaigns` (public, active), `GET /campaigns/:id`, `GET /campaigns/manage`*, `POST /campaigns`*, `PATCH /campaigns/:id`*, `PATCH /campaigns/:id/status`* |
-| Claims | `POST /claims`, `GET /claims/me`, `GET /claims`*, `PATCH /claims/:id/review`* |
-| Wallet | `GET /wallet`, `GET /wallet/transactions` |
-| Notifications | `GET /notifications`, `GET /notifications/unread-count`, `PATCH /notifications/:id/read`, `POST /notifications/read-all` |
-| Analytics | `POST /analytics/track`, `GET /analytics/summary`* |
-| Admin | `GET /admin/stats`*, `GET /admin/users`*, `PATCH /admin/users/:id/role`*, `PATCH /admin/users/:id/status`* |
+| Area          | Endpoints                                                                                                                                                      |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Auth          | `POST /auth/google`, `GET /auth/google/callback`, `POST /auth/refresh`, `POST /auth/logout`, `POST /auth/logout-all`, `GET /auth/me`                           |
+| Users         | `GET /users/me`, `PATCH /users/me`                                                                                                                             |
+| Campaigns     | `GET /campaigns` (public, active), `GET /campaigns/:id`, `GET /campaigns/manage`_, `POST /campaigns`_, `PATCH /campaigns/:id`_, `PATCH /campaigns/:id/status`_ |
+| Claims        | `POST /claims`, `GET /claims/me`, `GET /claims`_, `PATCH /claims/:id/review`_                                                                                  |
+| Wallet        | `GET /wallet`, `GET /wallet/transactions`                                                                                                                      |
+| Notifications | `GET /notifications`, `GET /notifications/unread-count`, `PATCH /notifications/:id/read`, `POST /notifications/read-all`                                       |
+| Analytics     | `POST /analytics/track`, `GET /analytics/summary`*                                                                                                             |
+| Admin         | `GET /admin/stats`_, `GET /admin/users`_, `PATCH /admin/users/:id/role`_, `PATCH /admin/users/:id/status`_                                                     |
 
 \* = admin only. Full request/response shapes in Swagger (`/docs`).
 
@@ -104,13 +140,13 @@ src/
 
 ## Scripts
 
-| Command | Description |
-|---|---|
-| `npm run dev` | Dev server with hot reload (tsx watch) |
-| `npm run build` / `npm start` | Compile and run production build |
-| `npm run prisma:generate` | Generate Prisma client |
-| `npm run prisma:migrate` | Create/apply dev migrations |
-| `npm run prisma:deploy` | Apply migrations in production |
-| `npx prisma db seed` | Seed the SUPER_ADMIN user |
-| `npm run typecheck` | TypeScript check without emit |
-| `npm run lint` / `npm run test` | Lint / run tests |
+| Command                         | Description                            |
+| ------------------------------- | -------------------------------------- |
+| `npm run dev`                   | Dev server with hot reload (tsx watch) |
+| `npm run build` / `npm start`   | Compile and run production build       |
+| `npm run prisma:generate`       | Generate Prisma client                 |
+| `npm run prisma:migrate`        | Create/apply dev migrations            |
+| `npm run prisma:deploy`         | Apply migrations in production         |
+| `npx prisma db seed`            | Seed the SUPER_ADMIN user              |
+| `npm run typecheck`             | TypeScript check without emit          |
+| `npm run lint` / `npm run test` | Lint / run tests                       |

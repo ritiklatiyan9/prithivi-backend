@@ -126,7 +126,9 @@ export class RouletteService {
 
   /** Serialize all plays for one user; hash collisions only add harmless extra serialization. */
   private async lockUserPlay(tx: Prisma.TransactionClient, userId: string): Promise<void> {
-    await tx.$queryRaw`
+    // $executeRaw, not $queryRaw: the lock functions return SQL `void`, which
+    // Prisma's row deserializer rejects (P2010).
+    await tx.$executeRaw`
       SELECT pg_advisory_xact_lock(hashtextextended(${userId}, 20260724))`;
   }
 
@@ -136,12 +138,12 @@ export class RouletteService {
    * linearizable snapshot without serializing unrelated plays.
    */
   private async lockProbabilityPolicyRead(tx: Prisma.TransactionClient): Promise<void> {
-    await tx.$queryRaw`
+    await tx.$executeRaw`
       SELECT pg_advisory_xact_lock_shared(20260724, 7301)`;
   }
 
   private async lockProbabilityPolicyWrite(tx: Prisma.TransactionClient): Promise<void> {
-    await tx.$queryRaw`
+    await tx.$executeRaw`
       SELECT pg_advisory_xact_lock(20260724, 7301)`;
   }
 

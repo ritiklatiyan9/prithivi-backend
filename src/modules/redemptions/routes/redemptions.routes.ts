@@ -8,6 +8,7 @@ import {
   fulfillRedemptionSchema,
   idParamsSchema,
   listMineQuerySchema,
+  markPaidSchema,
   reviewRedemptionSchema,
   updateVoucherOfferSchema,
   type AdminListRedemptionsQuery,
@@ -16,6 +17,7 @@ import {
   type FulfillRedemptionInput,
   type IdParams,
   type ListMineQuery,
+  type MarkPaidInput,
   type ReviewRedemptionInput,
   type UpdateVoucherOfferInput,
 } from "../schemas/redemptions.schema.js";
@@ -106,6 +108,51 @@ export const redemptionsRoutes = async (app: FastifyInstance): Promise<void> => 
       },
     },
     controller.review,
+  );
+
+  app.patch<{ Params: IdParams }>(
+    "/:id/claim",
+    {
+      preHandler: [authGuard, superAdminOnly],
+      schema: {
+        tags: ["redemptions"],
+        summary:
+          "Claim a UPI payout before sending the money — blocks reject/refund until paid or released (super admin)",
+        security: [{ bearerAuth: [] }],
+        params: idParamsSchema,
+      },
+    },
+    controller.claim,
+  );
+
+  app.patch<{ Params: IdParams }>(
+    "/:id/release",
+    {
+      preHandler: [authGuard, superAdminOnly],
+      schema: {
+        tags: ["redemptions"],
+        summary: "Release a claimed-but-unpaid UPI payout back to the pending queue (super admin)",
+        security: [{ bearerAuth: [] }],
+        params: idParamsSchema,
+      },
+    },
+    controller.release,
+  );
+
+  app.patch<{ Params: IdParams; Body: MarkPaidInput }>(
+    "/:id/mark-paid",
+    {
+      preHandler: [authGuard, superAdminOnly],
+      schema: {
+        tags: ["redemptions"],
+        summary:
+          "Confirm a UPI payout request was paid to the user's UPI ID; optional UTR reference (super admin)",
+        security: [{ bearerAuth: [] }],
+        params: idParamsSchema,
+        body: markPaidSchema,
+      },
+    },
+    controller.markPaid,
   );
 
   app.patch<{ Params: IdParams; Body: FulfillRedemptionInput }>(

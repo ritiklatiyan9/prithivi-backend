@@ -43,6 +43,19 @@ export const errorHandler = (
   }
 
   if (error instanceof Prisma.PrismaClientKnownRequestError) {
+    if (error.code === "P2021") {
+      reply
+        .status(503)
+        .send(
+          failure(
+            "DATABASE_MIGRATION_PENDING",
+            isProduction
+              ? "Server database schema is not up to date"
+              : `Prisma ${error.code}: ${error.message}`,
+          ),
+        );
+      return;
+    }
     if (error.code === "P2002") {
       reply.status(409).send(failure("CONFLICT", "A record with these values already exists"));
       return;

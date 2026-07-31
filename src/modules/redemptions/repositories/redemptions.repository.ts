@@ -1,5 +1,10 @@
 import { Prisma } from "@prisma/client";
-import type { PrismaClient, RedemptionStatus, VoucherOffer } from "@prisma/client";
+import type {
+  PrismaClient,
+  RedemptionMethod,
+  RedemptionStatus,
+  VoucherOffer,
+} from "@prisma/client";
 import { BadRequestError, ConflictError } from "../../../common/errors.js";
 import type { RedemptionWithOffer, RedemptionWithUser } from "../schemas/redemptions.schema.js";
 
@@ -19,16 +24,33 @@ export class RedemptionsRepository {
     return this.prisma.redemption.findUnique({ where: { id }, include: INCLUDE_ALL });
   }
 
+  /** The user's saved UPI VPA, if any. */
+  async findUserUpiId(userId: string): Promise<string | null> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { upiId: true },
+    });
+    return user?.upiId ?? null;
+  }
+
   /**
    * Atomically: enforce the one-pending rule, re-check balance, debit the
    * wallet and create the PENDING redemption. All guards live inside the
    * transaction so concurrent requests can't double-spend or double-submit.
+   * UPI payouts snapshot the VPA + rupee value on the row and save the VPA as
+   * the user's default for next time.
    */
   createRequest(
     userId: string,
     coins: number,
-    voucherOfferId?: string,
+    opts: {
+      voucherOfferId?: string;
+      method?: "VOUCHER" | "UPI";
+      upiId?: string;
+      amountInr?: number;
+    } = {},
   ): Promise<RedemptionWithOffer> {
+    const method = opts.method ?? "VOUCHER";
     return this.prisma.$transaction(async (tx) => {
       const wallet = await tx.wallet.upsert({
         where: { userId },
@@ -46,9 +68,21 @@ export class RedemptionsRepository {
       }
 
       const redemption = await tx.redemption.create({
-        data: { userId, coins: new Prisma.Decimal(coins), voucherOfferId: voucherOfferId ?? null },
+        data: {
+          userId,
+          coins: new Prisma.Decimal(coins),
+          voucherOfferId: opts.voucherOfferId ?? null,
+          method,
+          upiId: opts.upiId ?? null,
+          amountInr:
+            opts.amountInr !== undefined ? new Prisma.Decimal(opts.amountInr.toFixed(2)) : null,
+        },
         include: { voucherOffer: OFFER_SELECT },
       });
+
+      if (method === "UPI" && opts.upiId) {
+        await tx.user.update({ where: { id: userId }, data: { upiId: opts.upiId } });
+      }
 
       const updated = await tx.wallet.update({
         where: { id: wallet.id },
@@ -61,7 +95,7 @@ export class RedemptionsRepository {
           amount: new Prisma.Decimal(coins),
           balanceAfter: updated.balance,
           reference: `redemption:${redemption.id}`,
-          description: "Redemption request",
+          description: method === "UPI" ? "UPI payout request" : "Redemption request",
         },
       });
 
@@ -156,6 +190,7 @@ export class RedemptionsRepository {
     skip: number;
     take: number;
     status?: RedemptionStatus;
+    method?: RedemptionMethod;
     userId?: string;
     search?: string;
     from?: Date;
@@ -163,6 +198,7 @@ export class RedemptionsRepository {
   }): Promise<[RedemptionWithUser[], number]> {
     const where: Prisma.RedemptionWhereInput = {
       ...(params.status ? { status: params.status } : {}),
+      ...(params.method ? { method: params.method } : {}),
       ...(params.userId ? { userId: params.userId } : {}),
       ...(params.search
         ? { user: { email: { contains: params.search, mode: "insensitive" } } }

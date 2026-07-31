@@ -95,6 +95,13 @@ enum RedemptionStatus {
   FAILED
 }
 
+/// How a redemption pays out: a gift voucher, or rupees sent to the user's
+/// UPI ID by an admin (marked paid from the admin panel).
+enum RedemptionMethod {
+  VOUCHER
+  UPI
+}
+
 enum FraudEventType {
   DUPLICATE_IMAGE
   DAILY_LIMIT
@@ -141,6 +148,7 @@ model User {
   referralCode String?   @unique
   referredById String?
   referredAt   DateTime?
+  upiId        String? // saved UPI VPA for coin-to-rupee payouts
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
@@ -531,7 +539,10 @@ model Redemption {
   userId         String
   coins          Decimal          @db.Decimal(12, 2) // amount debited from the wallet
   status         RedemptionStatus @default(PENDING)
-  provider       String? // "plum" | "manual"
+  method         RedemptionMethod @default(VOUCHER)
+  upiId          String? // UPI VPA snapshot at request time (UPI payouts only)
+  amountInr      Decimal?         @db.Decimal(12, 2) // rupee value snapshot at request time (UPI payouts only)
+  provider       String? // "plum" | "manual" | "upi"
   voucherCode    String?
   voucherUrl     String?
   providerRef    String? // provider transaction/batch id (e.g. Plum batchId)
@@ -551,6 +562,7 @@ model Redemption {
 
   @@index([userId])
   @@index([status])
+  @@index([method, status])
   @@map("redemptions")
 }
 

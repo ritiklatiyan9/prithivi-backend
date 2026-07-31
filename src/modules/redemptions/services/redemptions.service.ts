@@ -14,6 +14,7 @@ import {
   type CreateVoucherOfferInput,
   type FulfillRedemptionInput,
   type ListMineQuery,
+  type MarkPaidInput,
   type RedemptionConfigDto,
   type RedemptionDto,
   type ReviewRedemptionInput,
@@ -32,11 +33,18 @@ export class RedemptionsService {
   ) {}
 
   async getConfig(): Promise<RedemptionConfigDto> {
-    const [enabled, minCoins] = await Promise.all([
+    const [enabled, minCoins, upiEnabled, coinsPerRupee, upiMinCoins] = await Promise.all([
       this.settings.getBoolean("redeem.enabled"),
       this.settings.getNumber("redeem.minCoins"),
+      this.settings.getBoolean("redeem.upi.enabled"),
+      this.settings.getNumber("redeem.upi.coinsPerRupee"),
+      this.settings.getNumber("redeem.upi.minCoins"),
     ]);
-    return { enabled, minCoins };
+    return {
+      enabled,
+      minCoins,
+      upi: { enabled: enabled && upiEnabled, coinsPerRupee, minCoins: upiMinCoins },
+    };
   }
 
   /** Admin: current Xoxoday reward-provider status (never returns secrets). */
@@ -54,6 +62,28 @@ export class RedemptionsService {
     const config = await this.getConfig();
     if (!config.enabled) throw new BadRequestError("Redemptions are currently disabled");
 
+    if (input.method === "UPI") {
+      if (!config.upi.enabled) throw new BadRequestError("UPI payouts are currently disabled");
+      const coins = input.coins!;
+      if (coins < config.upi.minCoins) {
+        throw new BadRequestError(`Minimum UPI payout is ${config.upi.minCoins} coins`);
+      }
+      const upiId = input.upiId ?? (await this.repo.findUserUpiId(userId));
+      if (!upiId) throw new BadRequestError("Add your UPI ID before requesting a payout");
+      // Rupee value is snapshotted at today's rate so a later rate change
+      // never alters what an already-submitted request is worth.
+      const amountInr = Math.round((coins / config.upi.coinsPerRupee) * 100) / 100;
+      if (amountInr < 1) {
+        throw new BadRequestError("This payout is below ₹1 — redeem more coins");
+      }
+      const redemption = await this.repo.createRequest(userId, coins, {
+        method: "UPI",
+        upiId,
+        amountInr,
+      });
+      return toRedemptionDto(redemption);
+    }
+
     let coins: number;
     let voucherOfferId: string | undefined;
     if (input.voucherOfferId) {
@@ -69,7 +99,7 @@ export class RedemptionsService {
     }
 
     // One-pending rule + balance check + debit all inside the transaction.
-    const redemption = await this.repo.createRequest(userId, coins, voucherOfferId);
+    const redemption = await this.repo.createRequest(userId, coins, { voucherOfferId });
     return toRedemptionDto(redemption);
   }
 
@@ -90,6 +120,7 @@ export class RedemptionsService {
     const [items, total] = await this.repo.listAdmin({
       ...toSkipTake(query),
       status: query.status,
+      method: query.method,
       userId: query.userId,
       search: query.search,
       from: query.from ? new Date(query.from) : undefined,
@@ -114,6 +145,13 @@ export class RedemptionsService {
     if (!redemption) throw new NotFoundError("Redemption not found");
     if (redemption.status !== "PENDING") {
       throw new ConflictError(`Redemption has already been ${redemption.status.toLowerCase()}`);
+    }
+    // A UPI request must never enter the voucher-provider path; it is settled
+    // with mark-paid after the admin actually sends the money.
+    if (redemption.method === "UPI" && input.action === "APPROVE") {
+      throw new BadRequestError(
+        "UPI payout requests are settled with mark-paid after sending the money",
+      );
     }
 
     if (input.action === "REJECT") {
@@ -204,12 +242,87 @@ export class RedemptionsService {
     }
   }
 
+  /**
+   * Claim a UPI payout before actually sending the money: guarded
+   * PENDING -> APPROVED. While claimed, reject (and its refund) is impossible,
+   * closing the race where admin A pays out-of-band and admin B rejects
+   * before A can mark paid — refunding the coins after real money left.
+   * release() undoes an unpaid claim.
+   */
+  async claim(id: string, reviewerId: string): Promise<RedemptionDto> {
+    const redemption = await this.repo.findById(id);
+    if (!redemption) throw new NotFoundError("Redemption not found");
+    if (redemption.method !== "UPI") {
+      throw new BadRequestError("Only UPI payout requests can be claimed");
+    }
+    const claimed = await this.repo.guardedUpdate(id, ["PENDING"], {
+      status: "APPROVED",
+      reviewedById: reviewerId,
+      reviewedAt: new Date(),
+    });
+    return toRedemptionDto(claimed, true);
+  }
+
+  /** Put a claimed-but-unpaid UPI payout back in the PENDING queue. */
+  async release(id: string): Promise<RedemptionDto> {
+    const redemption = await this.repo.findById(id);
+    if (!redemption) throw new NotFoundError("Redemption not found");
+    if (redemption.method !== "UPI") {
+      throw new BadRequestError("Only UPI payout requests can be released");
+    }
+    const released = await this.repo.guardedUpdate(id, ["APPROVED"], {
+      status: "PENDING",
+      reviewedById: null,
+      reviewedAt: null,
+    });
+    return toRedemptionDto(released, true);
+  }
+
+  /**
+   * Super admin confirms a UPI payout was sent (after paying via the QR /
+   * UPI ID from the admin panel). Guarded PENDING/APPROVED -> FULFILLED so
+   * two admins can't both settle the same request; the UTR lands in
+   * providerRef. APPROVED here means "claimed via claim()", never the voucher
+   * approval state — review() refuses APPROVE on UPI rows.
+   */
+  async markPaid(id: string, reviewerId: string, input: MarkPaidInput): Promise<RedemptionDto> {
+    const redemption = await this.repo.findById(id);
+    if (!redemption) throw new NotFoundError("Redemption not found");
+    if (redemption.method !== "UPI") {
+      throw new BadRequestError("Only UPI payout requests can be marked paid");
+    }
+
+    const paid = await this.repo.guardedUpdate(id, ["PENDING", "APPROVED"], {
+      status: "FULFILLED",
+      provider: "upi",
+      providerRef: input.paymentRef ?? null,
+      note: input.note ?? null,
+      failReason: null,
+      reviewedById: reviewerId,
+      reviewedAt: new Date(),
+    });
+    await this.safeNotify({
+      userId: paid.userId,
+      type: "WALLET",
+      title: "UPI payout sent 💸",
+      body: `₹${Number(paid.amountInr ?? 0).toFixed(2)} for ${Number(paid.coins)} coins has been sent to your UPI ID.`,
+      route: "/redeem/history",
+    });
+    return toRedemptionDto(paid, true);
+  }
+
   /** Super admin manually attaches a voucher to an APPROVED redemption. */
   async fulfill(
     id: string,
     reviewerId: string,
     input: FulfillRedemptionInput,
   ): Promise<RedemptionDto> {
+    const existing = await this.repo.findById(id);
+    if (!existing) throw new NotFoundError("Redemption not found");
+    // A claimed UPI payout is also APPROVED — never let a voucher code settle it.
+    if (existing.method === "UPI") {
+      throw new BadRequestError("UPI payout requests are settled with mark-paid");
+    }
     const fulfilled = await this.repo.guardedUpdate(id, ["APPROVED"], {
       status: "FULFILLED",
       provider: "manual",

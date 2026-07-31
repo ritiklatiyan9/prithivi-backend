@@ -105,6 +105,37 @@ export const SETTINGS_REGISTRY: readonly SettingDefinition[] = [
     min: 1,
     max: 1_000_000,
   },
+  // --- UPI payouts (coins -> rupees paid to the user's UPI ID) ---
+  {
+    key: "redeem.upi.enabled",
+    type: "BOOLEAN",
+    category: "UPI Payouts",
+    label: "UPI payouts enabled",
+    description:
+      "Master switch for redeeming coins as rupees paid to the user's UPI ID (settled manually from the admin panel).",
+    default: "true",
+  },
+  {
+    key: "redeem.upi.coinsPerRupee",
+    type: "NUMBER",
+    category: "UPI Payouts",
+    label: "Coins per rupee",
+    description: "Conversion rate: how many coins equal ₹1. Example: 10 means 100 coins = ₹10.",
+    default: "10",
+    min: 0.01,
+    max: 1_000_000,
+  },
+  {
+    key: "redeem.upi.minCoins",
+    type: "NUMBER",
+    category: "UPI Payouts",
+    label: "Minimum UPI payout coins",
+    description: "Smallest number of coins a user may redeem for a UPI payout in one request.",
+    default: "100",
+    min: 1,
+    max: 1_000_000,
+    integer: true,
+  },
   // --- Reward provider: Xoxoday Plum (coins -> gift-card codes / reward links) ---
   {
     key: "xoxoday.enabled",

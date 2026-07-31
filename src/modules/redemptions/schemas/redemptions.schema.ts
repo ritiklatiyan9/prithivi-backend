@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { Redemption, User, VoucherOffer } from "@prisma/client";
+import { UPI_VPA_MESSAGE, UPI_VPA_REGEX } from "../../../common/upi.js";
 
 export const redemptionStatus = z.enum([
   "PENDING",
@@ -9,17 +10,40 @@ export const redemptionStatus = z.enum([
   "FAILED",
 ]);
 
+export const redemptionMethod = z.enum(["VOUCHER", "UPI"]);
+
+export const upiIdSchema = z.string().trim().regex(UPI_VPA_REGEX, UPI_VPA_MESSAGE);
+
 export const idParamsSchema = z.object({ id: z.string().uuid() });
 export type IdParams = z.infer<typeof idParamsSchema>;
 
-/** Either a catalog item (voucherOfferId) or a legacy free coin amount. */
+/** VOUCHER: a catalog item (voucherOfferId) or a legacy free coin amount.
+ *  UPI: a coin amount converted to rupees and paid to the user's UPI ID. */
 export const createRedemptionSchema = z
   .object({
+    method: redemptionMethod.default("VOUCHER"),
     coins: z.number().int().positive().max(1_000_000).optional(),
     voucherOfferId: z.string().uuid().optional(),
+    /** Optional for UPI when the user already has a saved UPI ID. */
+    upiId: upiIdSchema.optional(),
   })
-  .refine((v) => (v.coins === undefined) !== (v.voucherOfferId === undefined), {
-    message: "Provide either coins or voucherOfferId",
+  .superRefine((v, ctx) => {
+    if (v.method === "UPI") {
+      if (v.coins === undefined) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "coins is required for UPI payouts" });
+      }
+      if (v.voucherOfferId !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "voucherOfferId is not allowed for UPI payouts",
+        });
+      }
+    } else if ((v.coins === undefined) === (v.voucherOfferId === undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Provide either coins or voucherOfferId",
+      });
+    }
   });
 export type CreateRedemptionInput = z.infer<typeof createRedemptionSchema>;
 
@@ -42,10 +66,19 @@ export const fulfillRedemptionSchema = z.object({
 });
 export type FulfillRedemptionInput = z.infer<typeof fulfillRedemptionSchema>;
 
+/** Admin confirms the money was sent to the user's UPI ID. */
+export const markPaidSchema = z.object({
+  /** UPI transaction reference (UTR) from the admin's payment app. */
+  paymentRef: z.string().trim().min(1).max(200).optional(),
+  note: z.string().max(1000).optional(),
+});
+export type MarkPaidInput = z.infer<typeof markPaidSchema>;
+
 export const adminListRedemptionsQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(20),
   status: redemptionStatus.optional(),
+  method: redemptionMethod.optional(),
   userId: z.string().uuid().optional(),
   /** Case-insensitive match on the requesting user's email. */
   search: z.string().max(200).optional(),
@@ -111,6 +144,11 @@ export interface RedemptionDto {
   id: string;
   coins: number;
   status: z.infer<typeof redemptionStatus>;
+  method: z.infer<typeof redemptionMethod>;
+  /** UPI VPA the payout goes to (snapshot at request time); null for vouchers. */
+  upiId: string | null;
+  /** Rupee value at the conversion rate captured at request time; null for vouchers. */
+  amountInr: number | null;
   provider: string | null;
   voucherCode: string | null;
   voucherUrl: string | null;
@@ -128,6 +166,12 @@ export interface RedemptionDto {
 export interface RedemptionConfigDto {
   enabled: boolean;
   minCoins: number;
+  upi: {
+    enabled: boolean;
+    /** How many coins equal ₹1 (10 => 100 coins = ₹10). */
+    coinsPerRupee: number;
+    minCoins: number;
+  };
 }
 
 export type RedemptionWithUser = Redemption & {
@@ -144,6 +188,9 @@ export const toRedemptionDto = (
   id: redemption.id,
   coins: Number(redemption.coins),
   status: redemption.status,
+  method: redemption.method,
+  upiId: redemption.upiId,
+  amountInr: redemption.amountInr === null ? null : Number(redemption.amountInr),
   provider: redemption.provider,
   voucherCode: redemption.voucherCode,
   voucherUrl: redemption.voucherUrl,

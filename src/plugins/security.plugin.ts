@@ -4,6 +4,7 @@ import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
 import type { FastifyInstance } from "fastify";
 import { env, isProduction } from "../config/env.js";
+import { isCorsOriginAllowed } from "./cors-origin.js";
 
 export default fp(
   async (app: FastifyInstance) => {
@@ -13,18 +14,9 @@ export default fp(
       crossOriginResourcePolicy: { policy: "cross-origin" }, // uploaded images are embedded cross-origin
     });
 
-    // Exact-match allowlist from a comma-separated env var — no wildcards in production.
-    const allowedOrigins = env.CORS_ORIGIN.split(",").map((origin) => origin.trim());
     await app.register(cors, {
       origin: (origin, callback) => {
-        // Allow non-browser clients (no Origin header): mobile apps, curl, health checks.
-        if (!origin || allowedOrigins.includes(origin)) {
-          callback(null, true);
-          return;
-        }
-        // Dev: any localhost/127.0.0.1 port (admin 5173, web 5174, previews…).
-        // Exact-match allowlist stays enforced in production.
-        if (!isProduction && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
+        if (isCorsOriginAllowed(origin, env.CORS_ORIGIN, isProduction)) {
           callback(null, true);
           return;
         }

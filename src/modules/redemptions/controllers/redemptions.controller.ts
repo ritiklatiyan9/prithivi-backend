@@ -8,6 +8,7 @@ import type {
   FulfillRedemptionInput,
   IdParams,
   ListMineQuery,
+  MarkPaidInput,
   ReviewRedemptionInput,
   UpdateVoucherOfferInput,
 } from "../schemas/redemptions.schema.js";
@@ -78,6 +79,32 @@ export class RedemptionsController {
     reply: FastifyReply,
   ): Promise<void> => {
     const redemption = await this.service.review(
+      request.params.id,
+      request.user.sub,
+      request.body,
+    );
+    reply.send(success(redemption));
+  };
+
+  claim = async (
+    request: FastifyRequest<{ Params: IdParams }>,
+    reply: FastifyReply,
+  ): Promise<void> => {
+    reply.send(success(await this.service.claim(request.params.id, request.user.sub)));
+  };
+
+  release = async (
+    request: FastifyRequest<{ Params: IdParams }>,
+    reply: FastifyReply,
+  ): Promise<void> => {
+    reply.send(success(await this.service.release(request.params.id)));
+  };
+
+  markPaid = async (
+    request: FastifyRequest<{ Params: IdParams; Body: MarkPaidInput }>,
+    reply: FastifyReply,
+  ): Promise<void> => {
+    const redemption = await this.service.markPaid(
       request.params.id,
       request.user.sub,
       request.body,
