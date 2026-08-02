@@ -110,6 +110,7 @@ export const ludoPurchaseAvailability = (
   const webhookConfigured =
     (configuredValue(credentials?.webhookSecret) ??
       configuredValue(env.RAZORPAY_WEBHOOK_SECRET)) !== null;
+  const canProvisionTestPlans = providerCredentials?.keyId.startsWith("rzp_test_") === true;
   const providerReady =
     providerCredentials !== null &&
     (providerCredentials.keyId.startsWith("rzp_test_") || webhookConfigured);
@@ -122,13 +123,14 @@ export const ludoPurchaseAvailability = (
 
   const plans = Object.fromEntries(
     (Object.keys(providerPlanIds) as LudoPaidPlanCode[]).map((plan) => {
-      const checkoutConfigured = providerReady && providerPlanIds[plan] !== null;
+      const checkoutConfigured =
+        providerReady && (providerPlanIds[plan] !== null || canProvisionTestPlans);
       const purchasable = settingEnabled && checkoutConfigured;
       const availabilityReason: LudoPlanAvailabilityReason | null = !settingEnabled
         ? "PURCHASES_DISABLED"
         : !providerReady
           ? "PAYMENT_NOT_CONFIGURED"
-          : providerPlanIds[plan] === null
+          : providerPlanIds[plan] === null && !canProvisionTestPlans
             ? "PLAN_NOT_CONFIGURED"
             : null;
       return [

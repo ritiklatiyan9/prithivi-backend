@@ -224,11 +224,13 @@ export class LudoSubscriptionService {
     }
     const planAvailability = availability.plans[input.plan];
     const credentials = await this.credentials();
-    const planId = planAvailability.providerPlanId;
-    if (!planAvailability.purchasable || !credentials || !planId) {
+    if (!planAvailability.purchasable || !credentials) {
       throw new AppError("This subscription plan is not configured", 503, "PAYMENT_NOT_CONFIGURED");
     }
     const plan = catalogPlan(input.plan);
+    const planId =
+      planAvailability.providerPlanId ??
+      (await this.provisionTestPlan(input.plan, plan.defaultName, plan.pricePaise));
     const providerPlan = await this.razorpay<RazorpayPlan>(`/plans/${encodeURIComponent(planId)}`, {
       method: "GET",
     });
@@ -544,6 +546,54 @@ export class LudoSubscriptionService {
       keyId: settingKeyId,
       keySecret: settingKeySecret,
     });
+  }
+
+  private async provisionTestPlan(
+    planCode: "PLUS" | "PRO",
+    planName: string,
+    pricePaise: number,
+  ): Promise<string> {
+    const settingKey =
+      planCode === "PRO" ? "game.ludo.proPlanId" : "game.ludo.plusPlanId";
+    const existingPlanId = configuredValue(await this.settings.getString(settingKey));
+    if (existingPlanId) return existingPlanId;
+
+    const credentials = await this.credentials();
+    if (!credentials?.keyId.startsWith("rzp_test_")) {
+      throw new AppError(
+        "Razorpay plan ID is required for live subscriptions",
+        503,
+        "PLAN_NOT_CONFIGURED",
+      );
+    }
+
+    const providerPlan = await this.razorpay<RazorpayPlan>("/plans", {
+      method: "POST",
+      body: {
+        period: "monthly",
+        interval: 1,
+        item: {
+          name: `Money Marathon ${planName}`,
+          amount: pricePaise,
+          currency: "INR",
+          description: `${planName} monthly membership`,
+        },
+        notes: { product: "ludo", plan: planCode, environment: "test" },
+      },
+    });
+    if (!providerPlan.id?.startsWith("plan_")) {
+      throw new AppError(
+        "Razorpay did not return a valid test plan",
+        502,
+        "PAYMENT_PROVIDER_ERROR",
+      );
+    }
+    this.assertProviderPlan(providerPlan, providerPlan.id, pricePaise);
+    await this.settings.update(
+      { values: { [settingKey]: providerPlan.id } },
+      undefined,
+    );
+    return providerPlan.id;
   }
 
   private assertProviderPlan(plan: RazorpayPlan, planId: string, pricePaise: number): void {

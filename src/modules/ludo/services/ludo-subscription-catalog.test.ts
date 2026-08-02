@@ -65,7 +65,7 @@ describe("Ludo subscription catalog", () => {
     });
   });
 
-  it("allows test checkout without a webhook secret and requires both provider plan ids", () => {
+  it("allows test checkout to provision missing plans without a webhook secret", () => {
     const noWebhook = ludoPurchaseAvailability(
       configuredEnv({ RAZORPAY_WEBHOOK_SECRET: undefined }),
       true,
@@ -79,11 +79,12 @@ describe("Ludo subscription catalog", () => {
       true,
       undefined,
     );
-    expect(noProPlan.purchaseEnabled).toBe(false);
+    expect(noProPlan.purchaseEnabled).toBe(true);
     expect(noProPlan.plans.PLUS.purchasable).toBe(true);
     expect(noProPlan.plans.PRO).toMatchObject({
-      purchasable: false,
-      availabilityReason: "PLAN_NOT_CONFIGURED",
+      purchasable: true,
+      availabilityReason: null,
+      providerPlanId: null,
     });
 
     const ready = ludoPurchaseAvailability(configuredEnv(), true);
