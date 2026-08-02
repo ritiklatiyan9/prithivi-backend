@@ -44,6 +44,16 @@ export const SETTINGS_REGISTRY: readonly SettingDefinition[] = [
     secret: true,
   },
   {
+    key: "payment.razorpay.webhookSecret",
+    type: "STRING",
+    category: "Add Coins",
+    label: "Razorpay webhook secret",
+    description:
+      "Optional in Razorpay Test Mode and required for live subscriptions. Falls back to RAZORPAY_WEBHOOK_SECRET.",
+    default: "",
+    secret: true,
+  },
+  {
     key: "coinPurchase.enabled",
     type: "BOOLEAN",
     category: "Add Coins",

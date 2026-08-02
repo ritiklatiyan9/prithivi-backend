@@ -22,6 +22,7 @@ import type { LudoService } from "./ludo.service.js";
 import {
   LUDO_SUBSCRIPTION_CATALOG,
   catalogPlan,
+  configuredValue,
   ludoPurchaseAvailability,
   razorpayCredentials,
   type LudoPurchaseAvailability,
@@ -100,20 +101,28 @@ export class LudoSubscriptionService {
   ) {}
 
   async plans(): Promise<Record<string, unknown>[]> {
-    const [settingEnabled, plusName, proName, plusPlanId, proPlanId, credentials] =
-      await Promise.all([
+    const [
+      settingEnabled,
+      plusName,
+      proName,
+      plusPlanId,
+      proPlanId,
+      credentials,
+      webhookSecret,
+    ] = await Promise.all([
         this.settings.getBoolean("game.ludo.subscriptionPurchaseEnabled"),
         this.settings.getString("game.ludo.plusPlanName"),
         this.settings.getString("game.ludo.proPlanName"),
         this.settings.getString("game.ludo.plusPlanId"),
         this.settings.getString("game.ludo.proPlanId"),
         this.credentials(),
+        this.settings.getString("payment.razorpay.webhookSecret"),
       ]);
     const availability = ludoPurchaseAvailability(
       this.env,
       settingEnabled,
       { plusPlanId, proPlanId },
-      credentials ?? undefined,
+      { ...credentials, webhookSecret },
     );
     const names = {
       FREE: "Free",
@@ -144,17 +153,19 @@ export class LudoSubscriptionService {
   }
 
   async purchaseAvailability(): Promise<LudoPurchaseAvailability> {
-    const [settingEnabled, plusPlanId, proPlanId, credentials] = await Promise.all([
-      this.settings.getBoolean("game.ludo.subscriptionPurchaseEnabled"),
-      this.settings.getString("game.ludo.plusPlanId"),
-      this.settings.getString("game.ludo.proPlanId"),
-      this.credentials(),
-    ]);
+    const [settingEnabled, plusPlanId, proPlanId, credentials, webhookSecret] =
+      await Promise.all([
+        this.settings.getBoolean("game.ludo.subscriptionPurchaseEnabled"),
+        this.settings.getString("game.ludo.plusPlanId"),
+        this.settings.getString("game.ludo.proPlanId"),
+        this.credentials(),
+        this.settings.getString("payment.razorpay.webhookSecret"),
+      ]);
     return ludoPurchaseAvailability(
       this.env,
       settingEnabled,
       { plusPlanId, proPlanId },
-      credentials ?? undefined,
+      { ...credentials, webhookSecret },
     );
   }
 
@@ -350,7 +361,7 @@ export class LudoSubscriptionService {
     signature: string | undefined,
     eventId: string | undefined,
   ): Promise<Record<string, unknown>> {
-    this.verifyWebhookSignature(rawBody, signature);
+    await this.verifyWebhookSignature(rawBody, signature);
     let body: RazorpayWebhook;
     try {
       body = JSON.parse(rawBody.toString("utf8")) as RazorpayWebhook;
@@ -568,12 +579,22 @@ export class LudoSubscriptionService {
       throw new BadRequestError("Invalid payment signature");
   }
 
-  private verifyWebhookSignature(rawBody: Buffer, signature: string | undefined): void {
+  private async verifyWebhookSignature(
+    rawBody: Buffer,
+    signature: string | undefined,
+  ): Promise<void> {
     if (!signature) throw new BadRequestError("Missing Razorpay webhook signature");
+    const settingWebhookSecret = await this.settings.getString(
+      "payment.razorpay.webhookSecret",
+    );
     const secrets = [
+      settingWebhookSecret,
       this.env.RAZORPAY_WEBHOOK_SECRET,
       this.env.RAZORPAY_WEBHOOK_SECRET_PREVIOUS,
-    ].filter((value): value is string => Boolean(value));
+    ]
+      .map(configuredValue)
+      .filter((value): value is string => value !== null)
+      .filter((value, index, values) => values.indexOf(value) === index);
     if (secrets.length === 0) {
       throw new AppError("Razorpay webhook is not configured", 503, "PAYMENT_NOT_CONFIGURED");
     }

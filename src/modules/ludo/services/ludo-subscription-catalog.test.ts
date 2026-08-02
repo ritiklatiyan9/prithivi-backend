@@ -65,14 +65,14 @@ describe("Ludo subscription catalog", () => {
     });
   });
 
-  it("requires credentials, current webhook secret, and both provider plan ids", () => {
+  it("allows test checkout without a webhook secret and requires both provider plan ids", () => {
     const noWebhook = ludoPurchaseAvailability(
       configuredEnv({ RAZORPAY_WEBHOOK_SECRET: undefined }),
       true,
       undefined,
     );
-    expect(noWebhook.purchaseEnabled).toBe(false);
-    expect(noWebhook.plans.PLUS.availabilityReason).toBe("PAYMENT_NOT_CONFIGURED");
+    expect(noWebhook.purchaseEnabled).toBe(true);
+    expect(noWebhook.plans.PLUS.availabilityReason).toBeNull();
 
     const noProPlan = ludoPurchaseAvailability(
       configuredEnv({ RAZORPAY_LUDO_PRO_PLAN_ID: undefined }),

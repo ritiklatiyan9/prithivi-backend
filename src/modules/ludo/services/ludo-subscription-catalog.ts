@@ -63,6 +63,7 @@ export const configuredValue = (value: string | undefined): string | null => {
 export interface RazorpayCredentialOverrides {
   keyId?: string;
   keySecret?: string;
+  webhookSecret?: string;
 }
 
 export const razorpayCredentials = (
@@ -105,9 +106,13 @@ export const ludoPurchaseAvailability = (
   },
   credentials?: RazorpayCredentialOverrides,
 ): LudoPurchaseAvailability => {
+  const providerCredentials = razorpayCredentials(env, credentials);
+  const webhookConfigured =
+    (configuredValue(credentials?.webhookSecret) ??
+      configuredValue(env.RAZORPAY_WEBHOOK_SECRET)) !== null;
   const providerReady =
-    razorpayCredentials(env, credentials) !== null &&
-    configuredValue(env.RAZORPAY_WEBHOOK_SECRET) !== null;
+    providerCredentials !== null &&
+    (providerCredentials.keyId.startsWith("rzp_test_") || webhookConfigured);
   const providerPlanIds: Record<LudoPaidPlanCode, string | null> = {
     PLUS:
       configuredValue(planIds?.plusPlanId) ??
