@@ -21,17 +21,25 @@ import type {
 export class HotOffersController {
   constructor(private readonly service: HotOffersService) {}
 
+  private cachePublic(reply: FastifyReply): FastifyReply {
+    // CDN/browser cache is intentionally shorter than the server cache's
+    // worst-case staleness across multiple API replicas.
+    return reply.header("Cache-Control", "public, max-age=30, stale-while-revalidate=120");
+  }
+
   // ---- public ----
 
   listCategories = async (_request: FastifyRequest, reply: FastifyReply): Promise<void> => {
-    reply.send(success(await this.service.listPublicCategories()));
+    this.cachePublic(reply).send(success(await this.service.listPublicCategories()));
   };
 
   getFeedbackPage = async (
     request: FastifyRequest<{ Params: SlugParams }>,
     reply: FastifyReply,
   ): Promise<void> => {
-    reply.send(success(await this.service.getPublicFeedbackPage(request.params.slug)));
+    this.cachePublic(reply).send(
+      success(await this.service.getPublicFeedbackPage(request.params.slug)),
+    );
   };
 
   listOffers = async (
@@ -39,14 +47,14 @@ export class HotOffersController {
     reply: FastifyReply,
   ): Promise<void> => {
     const { items, meta } = await this.service.listPublicOffers(request.query);
-    reply.send(success(items, meta));
+    this.cachePublic(reply).send(success(items, meta));
   };
 
   getOffer = async (
     request: FastifyRequest<{ Params: SlugParams }>,
     reply: FastifyReply,
   ): Promise<void> => {
-    reply.send(success(await this.service.getPublicOffer(request.params.slug)));
+    this.cachePublic(reply).send(success(await this.service.getPublicOffer(request.params.slug)));
   };
 
   getOfferComment = async (
@@ -104,9 +112,7 @@ export class HotOffersController {
     request: FastifyRequest<{ Params: IdParams; Body: UpsertFeedbackPageInput }>,
     reply: FastifyReply,
   ): Promise<void> => {
-    reply.send(
-      success(await this.service.upsertFeedbackPage(request.params.id, request.body)),
-    );
+    reply.send(success(await this.service.upsertFeedbackPage(request.params.id, request.body)));
   };
 
   adminListOffers = async (
@@ -163,9 +169,7 @@ export class HotOffersController {
     request: FastifyRequest<{ Body: SubmitProofInput }>,
     reply: FastifyReply,
   ): Promise<void> => {
-    reply
-      .status(201)
-      .send(success(await this.service.submitProof(request.user.sub, request.body)));
+    reply.status(201).send(success(await this.service.submitProof(request.user.sub, request.body)));
   };
 
   listMySubmissions = async (
@@ -199,9 +203,7 @@ export class HotOffersController {
     request: FastifyRequest<{ Params: IdParams }>,
     reply: FastifyReply,
   ): Promise<void> => {
-    reply.send(
-      success(await this.service.reopenSubmission(request.params.id, request.user.sub)),
-    );
+    reply.send(success(await this.service.reopenSubmission(request.params.id, request.user.sub)));
   };
 
   mySubmissionForOffer = async (

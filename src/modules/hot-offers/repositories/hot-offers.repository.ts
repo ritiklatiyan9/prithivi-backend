@@ -17,6 +17,7 @@ import type {
   ListSubmissionsQuery,
   SubmissionWithRelations,
 } from "../schemas/submissions.schema.js";
+import { ConflictError } from "../../../common/errors.js";
 
 const SUBMISSION_OFFER_SELECT = {
   offer: { select: { title: true, slug: true, thumbnailUrl: true } },
@@ -33,9 +34,7 @@ const OFFER_INCLUDE = {
   category: { select: { id: true, slug: true, title: true } },
 } as const;
 
-const offerOrderBy = (
-  sort: ListOffersQuery["sort"],
-): Prisma.OfferOrderByWithRelationInput[] => {
+const offerOrderBy = (sort: ListOffersQuery["sort"]): Prisma.OfferOrderByWithRelationInput[] => {
   switch (sort) {
     case "newest":
       return [{ createdAt: "desc" }];
@@ -104,7 +103,9 @@ export class HotOffersRepository {
   findFeedbackPageByCategorySlug(
     slug: string,
     publishedOnly: boolean,
-  ): Promise<(FeedbackPage & { category: { slug: string; title: string; imageUrl: string | null } }) | null> {
+  ): Promise<
+    (FeedbackPage & { category: { slug: string; title: string; imageUrl: string | null } }) | null
+  > {
     return this.prisma.feedbackPage.findFirst({
       where: {
         deletedAt: null,
@@ -118,7 +119,9 @@ export class HotOffersRepository {
   upsertFeedbackPage(
     categoryId: string,
     data: Omit<Prisma.FeedbackPageUncheckedCreateInput, "categoryId">,
-  ): Promise<FeedbackPage & { category: { slug: string; title: string; imageUrl: string | null } }> {
+  ): Promise<
+    FeedbackPage & { category: { slug: string; title: string; imageUrl: string | null } }
+  > {
     return this.prisma.feedbackPage.upsert({
       where: { categoryId },
       create: { categoryId, ...data },
@@ -238,7 +241,14 @@ export class HotOffersRepository {
   /** Per-offer view/click/download counts, top N by downloads then views. */
   async topOffers(since: Date, limit: number) {
     return this.prisma.$queryRaw<
-      { id: string; slug: string; title: string; views: bigint; clicks: bigint; downloads: bigint }[]
+      {
+        id: string;
+        slug: string;
+        title: string;
+        views: bigint;
+        clicks: bigint;
+        downloads: bigint;
+      }[]
     >`
       SELECT o.id, o.slug, o.title,
              COUNT(*) FILTER (WHERE e.type = 'VIEW')     AS views,
@@ -255,7 +265,14 @@ export class HotOffersRepository {
 
   async topCategories(since: Date, limit: number) {
     return this.prisma.$queryRaw<
-      { id: string; slug: string; title: string; views: bigint; clicks: bigint; downloads: bigint }[]
+      {
+        id: string;
+        slug: string;
+        title: string;
+        views: bigint;
+        clicks: bigint;
+        downloads: bigint;
+      }[]
     >`
       SELECT c.id, c.slug, c.title,
              COUNT(*) FILTER (WHERE e.type = 'VIEW')     AS views,
@@ -312,7 +329,9 @@ export class HotOffersRepository {
     return this.prisma.offerSubmission.findUnique({ where: { id } });
   }
 
-  createSubmission(data: Prisma.OfferSubmissionUncheckedCreateInput): Promise<SubmissionWithRelations> {
+  createSubmission(
+    data: Prisma.OfferSubmissionUncheckedCreateInput,
+  ): Promise<SubmissionWithRelations> {
     return this.prisma.offerSubmission.create({ data, include: SUBMISSION_OFFER_SELECT });
   }
 
@@ -384,9 +403,15 @@ export class HotOffersRepository {
    */
   async approveSubmission(id: string, reviewerId: string): Promise<SubmissionWithRelations> {
     return this.prisma.$transaction(async (tx) => {
-      const submission = await tx.offerSubmission.update({
-        where: { id },
+      const marked = await tx.offerSubmission.updateMany({
+        where: { id, status: "PENDING" },
         data: { status: "APPROVED", reviewedById: reviewerId, reviewedAt: new Date() },
+      });
+      if (marked.count === 0) {
+        throw new ConflictError("Submission has already been reviewed");
+      }
+      const submission = await tx.offerSubmission.findUniqueOrThrow({
+        where: { id },
         include: SUBMISSION_OFFER_SELECT,
       });
 
@@ -415,25 +440,41 @@ export class HotOffersRepository {
   }
 
   /** Non-crediting review outcome (REJECTED or NEED_MORE_PROOF). */
-  setReviewOutcome(
+  async setReviewOutcome(
     id: string,
     status: "REJECTED" | "NEED_MORE_PROOF",
     reviewerId: string,
     reviewNote: string | null,
   ): Promise<SubmissionWithRelations> {
-    return this.prisma.offerSubmission.update({
-      where: { id },
-      data: { status, reviewNote, reviewedById: reviewerId, reviewedAt: new Date() },
-      include: SUBMISSION_OFFER_SELECT,
+    return this.prisma.$transaction(async (tx) => {
+      const marked = await tx.offerSubmission.updateMany({
+        where: { id, status: "PENDING" },
+        data: { status, reviewNote, reviewedById: reviewerId, reviewedAt: new Date() },
+      });
+      if (marked.count === 0) {
+        throw new ConflictError("Submission has already been reviewed");
+      }
+      return tx.offerSubmission.findUniqueOrThrow({
+        where: { id },
+        include: SUBMISSION_OFFER_SELECT,
+      });
     });
   }
 
   /** User cancels their own pending submission. */
-  cancelSubmission(id: string): Promise<SubmissionWithRelations> {
-    return this.prisma.offerSubmission.update({
-      where: { id },
-      data: { status: "CANCELLED" },
-      include: SUBMISSION_OFFER_SELECT,
+  async cancelSubmission(id: string): Promise<SubmissionWithRelations> {
+    return this.prisma.$transaction(async (tx) => {
+      const marked = await tx.offerSubmission.updateMany({
+        where: { id, status: "PENDING" },
+        data: { status: "CANCELLED" },
+      });
+      if (marked.count === 0) {
+        throw new ConflictError("Submission can no longer be cancelled");
+      }
+      return tx.offerSubmission.findUniqueOrThrow({
+        where: { id },
+        include: SUBMISSION_OFFER_SELECT,
+      });
     });
   }
 
@@ -485,13 +526,13 @@ export class HotOffersRepository {
   }
 
   /** Distinct users with a non-cancelled submission for an offer (maxUsers). */
-  async countDistinctParticipants(offerId: string): Promise<number> {
-    const rows = await this.prisma.offerSubmission.findMany({
+  countDistinctParticipants(offerId: string): Promise<number> {
+    // [offerId,userId] is unique, so COUNT is already a distinct participant
+    // count. Let PostgreSQL return one scalar instead of materializing every
+    // participant id in Node.js.
+    return this.prisma.offerSubmission.count({
       where: { offerId, status: { not: "CANCELLED" } },
-      select: { userId: true },
-      distinct: ["userId"],
     });
-    return rows.length;
   }
 
   /** Approved submissions for an offer (maxRewards). */
@@ -500,11 +541,7 @@ export class HotOffersRepository {
   }
 
   /** This user's image-upload attempts for an offer since [since] (dailyLimit). */
-  countImagesForUserOfferSince(
-    userId: string,
-    offerId: string,
-    since: Date,
-  ): Promise<number> {
+  countImagesForUserOfferSince(userId: string, offerId: string, since: Date): Promise<number> {
     return this.prisma.submissionImage.count({
       where: { createdAt: { gte: since }, submission: { userId, offerId } },
     });

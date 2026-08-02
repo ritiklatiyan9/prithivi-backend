@@ -136,6 +136,82 @@ enum RouletteProbabilityMode {
   WEIGHTED
 }
 
+enum LudoGameMode {
+  TWO_PLAYER
+  THREE_PLAYER
+  FOUR_PLAYER
+}
+
+enum LudoQueueStatus {
+  QUEUED
+  MATCHED
+  CANCELLED
+  TIMED_OUT
+}
+
+enum LudoRoomStatus {
+  MATCHED
+  WAITING_READY
+  ACTIVE
+  COMPLETED
+  CANCELLED
+  ABANDONED
+  EXPIRED
+}
+
+enum LudoPlayerStatus {
+  MATCHED
+  ACCEPTED
+  READY
+  ACTIVE
+  DISCONNECTED
+  FORFEITED
+  FINISHED
+}
+
+enum LudoMessageType {
+  QUICK
+  TEXT
+}
+
+enum LudoPlan {
+  FREE
+  PLUS
+  PRO
+}
+
+enum LudoSubscriptionStatus {
+  PENDING
+  AUTHENTICATED
+  ACTIVE
+  PAUSED
+  CANCELLED
+  COMPLETED
+  EXPIRED
+  PAYMENT_FAILED
+}
+
+enum LudoPaymentEventStatus {
+  PROCESSING
+  PROCESSED
+  IGNORED
+  FAILED
+}
+
+enum LudoReportStatus {
+  OPEN
+  IN_REVIEW
+  RESOLVED
+  DISMISSED
+}
+
+enum LudoRestrictionType {
+  GAME_ACCESS
+  COMMUNICATION
+  TEXT_CHAT
+  VOICE_CHAT
+}
+
 model User {
   id           String    @id @default(uuid())
   email        String    @unique
@@ -155,25 +231,43 @@ model User {
   referredBy User?  @relation("Referrals", fields: [referredById], references: [id])
   referrals  User[] @relation("Referrals")
 
-  wallet              Wallet?
-  refreshTokens       RefreshToken[]
-  claims              Claim[]
-  notifications       Notification[]
-  campaigns           Campaign[]          @relation("CampaignCreator")
-  reviewedClaims      Claim[]             @relation("ClaimReviewer")
-  analyticsEvents     AnalyticsEvent[]
-  deviceTokens        DeviceToken[]
-  sentPushLogs        PushLog[]           @relation("PushLogSender")
-  offerSubmissions    OfferSubmission[]   @relation("OfferSubmissionUser")
-  reviewedSubmissions OfferSubmission[]   @relation("OfferSubmissionReviewer")
-  fraudLogs           FraudLog[]
-  redemptions         Redemption[]        @relation("RedemptionUser")
-  reviewedRedemptions Redemption[]        @relation("RedemptionReviewer")
-  gameMatches         GameMatch[]
-  missionCompletions  MissionCompletion[]
-  rouletteRounds      RouletteRound[]
-  coinPurchases       CoinPurchase[]
+  wallet                  Wallet?
+  refreshTokens           RefreshToken[]
+  claims                  Claim[]
+  notifications           Notification[]
+  campaigns               Campaign[]             @relation("CampaignCreator")
+  reviewedClaims          Claim[]                @relation("ClaimReviewer")
+  analyticsEvents         AnalyticsEvent[]
+  deviceTokens            DeviceToken[]
+  sentPushLogs            PushLog[]              @relation("PushLogSender")
+  offerSubmissions        OfferSubmission[]      @relation("OfferSubmissionUser")
+  reviewedSubmissions     OfferSubmission[]      @relation("OfferSubmissionReviewer")
+  fraudLogs               FraudLog[]
+  redemptions             Redemption[]           @relation("RedemptionUser")
+  reviewedRedemptions     Redemption[]           @relation("RedemptionReviewer")
+  gameMatches             GameMatch[]
+  missionCompletions      MissionCompletion[]
+  rouletteRounds          RouletteRound[]
+  coinPurchases           CoinPurchase[]
+  ludoQueueEntry          LudoQueueEntry?
+  ludoPlayers             LudoPlayer[]
+  ludoStatistics          LudoStatistics?
+  ludoChatMessages        LudoChatMessage[]
+  ludoVoiceParticipants   LudoVoiceParticipant[]
+  ludoSubscriptions       LudoSubscription[]
+  ludoEntitlement         LudoEntitlement?
+  ludoReportsFiled        LudoReport[]           @relation("LudoReportReporter")
+  ludoReportsAgainst      LudoReport[]           @relation("LudoReportTarget")
+  ludoReportsResolved     LudoReport[]           @relation("LudoReportResolver")
+  ludoRestrictions        LudoRestriction[]      @relation("LudoRestrictionTarget")
+  ludoRestrictionsCreated LudoRestriction[]      @relation("LudoRestrictionCreator")
+  ludoBlocks              LudoUserBlock[]        @relation("LudoBlockOwner")
+  ludoBlockedBy           LudoUserBlock[]        @relation("LudoBlockedUser")
+  ludoMutes               LudoUserMute[]         @relation("LudoMuteOwner")
+  ludoMutedBy             LudoUserMute[]         @relation("LudoMutedUser")
 
+  @@index([createdAt])
+  @@index([referredById, referredAt])
   @@map("users")
 }
 
@@ -208,7 +302,7 @@ model Campaign {
   createdBy User    @relation("CampaignCreator", fields: [createdById], references: [id])
   claims    Claim[]
 
-  @@index([status])
+  @@index([status, createdAt])
   @@index([createdById])
   @@map("campaigns")
 }
@@ -231,8 +325,8 @@ model Claim {
   reviewedBy User?    @relation("ClaimReviewer", fields: [reviewedById], references: [id])
 
   @@unique([campaignId, userId])
-  @@index([userId])
-  @@index([status])
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
   @@map("claims")
 }
 
@@ -262,6 +356,7 @@ model WalletTransaction {
   wallet Wallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
 
   @@index([walletId, createdAt])
+  @@index([walletId, type, createdAt])
   @@map("wallet_transactions")
 }
 
@@ -344,6 +439,7 @@ model PushLog {
   sentBy User @relation("PushLogSender", fields: [sentById], references: [id])
 
   @@index([createdAt])
+  @@index([status, scheduledAt])
   @@map("push_logs")
 }
 
@@ -387,6 +483,7 @@ model AnalyticsEvent {
   user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   @@index([name, createdAt])
+  @@index([createdAt])
   @@map("analytics_events")
 }
 
@@ -483,6 +580,7 @@ model Offer {
 
   @@index([categoryId, status, priority])
   @@index([status, featured])
+  @@index([status, createdAt])
   @@map("offers")
 }
 
@@ -510,7 +608,8 @@ model OfferSubmission {
 
   @@unique([offerId, userId]) // one submission per user per offer (resubmit reuses the row)
   @@index([status, createdAt])
-  @@index([userId])
+  @@index([userId, createdAt])
+  @@index([userId, status])
   @@map("offer_submissions")
 }
 
@@ -560,9 +659,11 @@ model Redemption {
   // must never silently strip attribution off an in-flight redemption.
   voucherOffer VoucherOffer? @relation(fields: [voucherOfferId], references: [id], onDelete: Restrict)
 
-  @@index([userId])
-  @@index([status])
-  @@index([method, status])
+  @@index([userId, createdAt])
+  @@index([userId, status, createdAt])
+  @@index([status, createdAt])
+  @@index([method, status, createdAt])
+  @@index([voucherOfferId])
   @@map("redemptions")
 }
 
@@ -772,8 +873,8 @@ model MissionCompletion {
   user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([missionId, userId])
-  @@index([userId])
-  @@index([status])
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
   @@map("mission_completions")
 }
 
@@ -788,4 +889,312 @@ model AppAsset {
   updatedAt   DateTime @updatedAt
 
   @@map("app_assets")
+}
+
+// ---------------------------------------------------------------------------
+// Real-time Ludo
+// ---------------------------------------------------------------------------
+
+model LudoQueueEntry {
+  id            String          @id @default(uuid())
+  userId        String          @unique
+  mode          LudoGameMode
+  status        LudoQueueStatus @default(QUEUED)
+  region        String?
+  pingMs        Int?
+  joinedAt      DateTime        @default(now()) @db.Timestamptz(3)
+  expiresAt     DateTime        @db.Timestamptz(3)
+  matchedRoomId String?
+  acceptedAt    DateTime?       @db.Timestamptz(3)
+  updatedAt     DateTime        @updatedAt @db.Timestamptz(3)
+
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  matchedRoom LudoRoom? @relation(fields: [matchedRoomId], references: [id], onDelete: SetNull)
+
+  @@index([mode, status, joinedAt])
+  @@index([status, expiresAt])
+  @@map("ludo_queue_entries")
+}
+
+model LudoRoom {
+  id                 String         @id @default(uuid())
+  mode               LudoGameMode
+  status             LudoRoomStatus @default(MATCHED)
+  state              Json
+  configSnapshot     Json
+  stateVersion       Int            @default(0)
+  acceptanceDeadline DateTime?      @db.Timestamptz(3)
+  turnDeadline       DateTime?      @db.Timestamptz(3)
+  startedAt          DateTime?      @db.Timestamptz(3)
+  completedAt        DateTime?      @db.Timestamptz(3)
+  cancelledReason    String?
+  createdAt          DateTime       @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime       @updatedAt @db.Timestamptz(3)
+
+  players      LudoPlayer[]
+  actions      LudoAction[]
+  queueEntries LudoQueueEntry[]
+  chatMessages LudoChatMessage[]
+  voiceSession LudoVoiceSession?
+  reports      LudoReport[]
+  mutes        LudoUserMute[]
+
+  @@index([status, createdAt])
+  @@index([mode, status, createdAt])
+  @@index([status, turnDeadline])
+  @@map("ludo_rooms")
+}
+
+model LudoPlayer {
+  id                      String           @id @default(uuid())
+  roomId                  String
+  userId                  String
+  seat                    Int
+  color                   String
+  status                  LudoPlayerStatus @default(MATCHED)
+  activeKey               String?          @unique
+  resumeTokenHash         String           @unique
+  lastAcknowledgedVersion Int              @default(0)
+  acceptedAt              DateTime?        @db.Timestamptz(3)
+  readyAt                 DateTime?        @db.Timestamptz(3)
+  disconnectedAt          DateTime?        @db.Timestamptz(3)
+  reconnectDeadline       DateTime?        @db.Timestamptz(3)
+  finishedPosition        Int?
+  captures                Int              @default(0)
+  diceRolls               Int              @default(0)
+  pawnsCompleted          Int              @default(0)
+  turnTimeouts            Int              @default(0)
+  disconnectCount         Int              @default(0)
+  joinedAt                DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt               DateTime         @updatedAt @db.Timestamptz(3)
+
+  room LudoRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, userId])
+  @@unique([roomId, seat])
+  @@index([userId, status, updatedAt])
+  @@index([roomId, status])
+  @@map("ludo_players")
+}
+
+model LudoAction {
+  id           String   @id @default(uuid())
+  roomId       String
+  userId       String?
+  actionId     String
+  type         String
+  stateVersion Int
+  payload      Json
+  serverEvent  Json
+  createdAt    DateTime @default(now()) @db.Timestamptz(3)
+
+  room LudoRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, actionId])
+  @@unique([roomId, stateVersion])
+  @@index([roomId, createdAt])
+  @@index([userId, createdAt])
+  @@map("ludo_actions")
+}
+
+model LudoStatistics {
+  id                   String   @id @default(uuid())
+  userId               String   @unique
+  totalMatches         Int      @default(0)
+  wins                 Int      @default(0)
+  losses               Int      @default(0)
+  twoPlayerMatches     Int      @default(0)
+  threePlayerMatches   Int      @default(0)
+  fourPlayerMatches    Int      @default(0)
+  disconnects          Int      @default(0)
+  forfeits             Int      @default(0)
+  captures             Int      @default(0)
+  diceRolls            Int      @default(0)
+  pawnsCompleted       Int      @default(0)
+  totalDurationSeconds Int      @default(0)
+  updatedAt            DateTime @updatedAt @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("ludo_statistics")
+}
+
+model LudoChatMessage {
+  id             String          @id @default(uuid())
+  roomId         String
+  userId         String
+  clientActionId String
+  type           LudoMessageType
+  content        String
+  createdAt      DateTime        @default(now()) @db.Timestamptz(3)
+
+  room LudoRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, userId, clientActionId])
+  @@index([roomId, createdAt])
+  @@index([userId, createdAt])
+  @@map("ludo_chat_messages")
+}
+
+model LudoVoiceSession {
+  id        String    @id @default(uuid())
+  roomId    String    @unique
+  startedAt DateTime  @default(now()) @db.Timestamptz(3)
+  endedAt   DateTime? @db.Timestamptz(3)
+
+  room         LudoRoom               @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  participants LudoVoiceParticipant[]
+
+  @@map("ludo_voice_sessions")
+}
+
+model LudoVoiceParticipant {
+  id                 String    @id @default(uuid())
+  sessionId          String
+  userId             String
+  joinedAt           DateTime  @default(now()) @db.Timestamptz(3)
+  leftAt             DateTime? @db.Timestamptz(3)
+  connectionFailures Int       @default(0)
+
+  session LudoVoiceSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user    User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, userId])
+  @@index([userId, joinedAt])
+  @@map("ludo_voice_participants")
+}
+
+model LudoUserBlock {
+  userId        String
+  blockedUserId String
+  createdAt     DateTime @default(now()) @db.Timestamptz(3)
+
+  user        User @relation("LudoBlockOwner", fields: [userId], references: [id], onDelete: Cascade)
+  blockedUser User @relation("LudoBlockedUser", fields: [blockedUserId], references: [id], onDelete: Cascade)
+
+  @@id([userId, blockedUserId])
+  @@index([blockedUserId])
+  @@map("ludo_user_blocks")
+}
+
+model LudoUserMute {
+  roomId      String
+  userId      String
+  mutedUserId String
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  room      LudoRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user      User     @relation("LudoMuteOwner", fields: [userId], references: [id], onDelete: Cascade)
+  mutedUser User     @relation("LudoMutedUser", fields: [mutedUserId], references: [id], onDelete: Cascade)
+
+  @@id([roomId, userId, mutedUserId])
+  @@index([mutedUserId])
+  @@map("ludo_user_mutes")
+}
+
+model LudoReport {
+  id           String           @id @default(uuid())
+  roomId       String?
+  reporterId   String
+  targetUserId String
+  messageId    String?
+  category     String
+  details      String?
+  status       LudoReportStatus @default(OPEN)
+  resolution   String?
+  resolvedById String?
+  resolvedAt   DateTime?        @db.Timestamptz(3)
+  createdAt    DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime         @updatedAt @db.Timestamptz(3)
+
+  room       LudoRoom? @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  reporter   User      @relation("LudoReportReporter", fields: [reporterId], references: [id], onDelete: Cascade)
+  targetUser User      @relation("LudoReportTarget", fields: [targetUserId], references: [id], onDelete: Cascade)
+  resolvedBy User?     @relation("LudoReportResolver", fields: [resolvedById], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+  @@index([targetUserId, createdAt])
+  @@index([roomId, createdAt])
+  @@map("ludo_reports")
+}
+
+model LudoRestriction {
+  id          String              @id @default(uuid())
+  userId      String
+  type        LudoRestrictionType
+  reason      String
+  expiresAt   DateTime?           @db.Timestamptz(3)
+  revokedAt   DateTime?           @db.Timestamptz(3)
+  createdById String?
+  createdAt   DateTime            @default(now()) @db.Timestamptz(3)
+
+  user      User  @relation("LudoRestrictionTarget", fields: [userId], references: [id], onDelete: Cascade)
+  createdBy User? @relation("LudoRestrictionCreator", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([userId, type, expiresAt])
+  @@index([createdAt])
+  @@map("ludo_restrictions")
+}
+
+model LudoSubscription {
+  id                     String                 @id @default(uuid())
+  userId                 String
+  plan                   LudoPlan
+  status                 LudoSubscriptionStatus @default(PENDING)
+  razorpayCustomerId     String?
+  razorpaySubscriptionId String                 @unique
+  razorpayPlanId         String
+  latestPaymentId        String?
+  currentPeriodStart     DateTime?              @db.Timestamptz(3)
+  currentPeriodEnd       DateTime?              @db.Timestamptz(3)
+  cancelledAt            DateTime?              @db.Timestamptz(3)
+  createdAt              DateTime               @default(now()) @db.Timestamptz(3)
+  updatedAt              DateTime               @updatedAt @db.Timestamptz(3)
+
+  user          User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  paymentEvents LudoPaymentEvent[]
+
+  @@index([userId, createdAt])
+  @@index([userId, status, currentPeriodEnd])
+  @@index([razorpayCustomerId])
+  @@map("ludo_subscriptions")
+}
+
+model LudoEntitlement {
+  id                   String                 @id @default(uuid())
+  userId               String                 @unique
+  plan                 LudoPlan               @default(FREE)
+  status               LudoSubscriptionStatus @default(EXPIRED)
+  sourceSubscriptionId String?
+  startsAt             DateTime?              @db.Timestamptz(3)
+  expiresAt            DateTime?              @db.Timestamptz(3)
+  version              Int                    @default(1)
+  updatedAt            DateTime               @updatedAt @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([status, expiresAt])
+  @@map("ludo_entitlements")
+}
+
+model LudoPaymentEvent {
+  id                   String                 @id @default(uuid())
+  razorpayEventId      String                 @unique
+  type                 String
+  status               LudoPaymentEventStatus @default(PROCESSING)
+  subscriptionRecordId String?
+  razorpayPaymentId    String?
+  summary              Json?
+  error                String?
+  processedAt          DateTime?              @db.Timestamptz(3)
+  createdAt            DateTime               @default(now()) @db.Timestamptz(3)
+
+  subscription LudoSubscription? @relation(fields: [subscriptionRecordId], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+  @@index([razorpayPaymentId])
+  @@index([subscriptionRecordId, createdAt])
+  @@map("ludo_payment_events")
 }

@@ -1,6 +1,14 @@
-import type { Campaign, Claim, ClaimStatus, Prisma, PrismaClient, User } from "@prisma/client";
+import type { Claim, ClaimStatus, Prisma, PrismaClient } from "@prisma/client";
 
-export type ClaimWithRelations = Claim & { campaign: Campaign; user: User };
+export type ClaimWithRelations = Claim & {
+  campaign: { title: string };
+  user: { email: string };
+};
+
+const CLAIM_RELATIONS = {
+  campaign: { select: { title: true } },
+  user: { select: { email: true } },
+} as const;
 
 export class ClaimsRepository {
   constructor(private readonly prisma: PrismaClient) {}
@@ -12,7 +20,7 @@ export class ClaimsRepository {
   findById(id: string): Promise<ClaimWithRelations | null> {
     return this.prisma.claim.findUnique({
       where: { id },
-      include: { campaign: true, user: true },
+      include: CLAIM_RELATIONS,
     });
   }
 
@@ -36,7 +44,7 @@ export class ClaimsRepository {
         skip: params.skip,
         take: params.take,
         orderBy: { createdAt: "desc" },
-        include: { campaign: true, user: true },
+        include: CLAIM_RELATIONS,
       }),
       this.prisma.claim.count({ where }),
     ]);
@@ -54,7 +62,7 @@ export class ClaimsRepository {
         skip: params.skip,
         take: params.take,
         orderBy: { createdAt: "desc" },
-        include: { campaign: true, user: true },
+        include: CLAIM_RELATIONS,
       }),
       this.prisma.claim.count({ where }),
     ]);

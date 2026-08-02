@@ -80,3 +80,35 @@ export const startScheduler = (app: FastifyInstance): (() => void) => {
   app.log.info("in-process push scheduler started (Redis-free)");
   return () => clearInterval(timer);
 };
+
+/** Authoritative Ludo timeout/reconnect/queue sweeps plus socket heartbeat
+ * eviction. Both timers are stopped by the server shutdown path. */
+export const startLudoRuntime = (app: FastifyInstance): (() => void) => {
+  let running = false;
+  const sweep = async (): Promise<void> => {
+    if (running) return;
+    running = true;
+    try {
+      await app.di.ludoService.sweep();
+    } catch (error) {
+      app.log.error({ err: error, component: "ludo-sweeper" }, "ludo sweep failed");
+    } finally {
+      running = false;
+    }
+  };
+  void sweep();
+  const sweepTimer = setInterval(() => void sweep(), 3_000);
+  sweepTimer.unref();
+  const heartbeatTimer = setInterval(() => {
+    const staleUserIds = app.di.ludoHub.closeStale(Date.now() - 45_000);
+    if (staleUserIds.length > 0) {
+      app.log.info({ staleConnections: staleUserIds.length }, "closed stale ludo sockets");
+    }
+  }, 15_000);
+  heartbeatTimer.unref();
+  app.log.info({ component: "ludo-runtime" }, "ludo realtime workers started");
+  return () => {
+    clearInterval(sweepTimer);
+    clearInterval(heartbeatTimer);
+  };
+};

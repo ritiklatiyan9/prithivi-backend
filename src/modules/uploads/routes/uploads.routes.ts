@@ -15,6 +15,9 @@ export const uploadsRoutes = async (app: FastifyInstance): Promise<void> => {
     "/",
     {
       preHandler: [authGuard],
+      // Storage and image processing are materially more expensive than JSON
+      // reads; cap accidental retry storms and authenticated storage abuse.
+      config: { rateLimit: { max: 20, timeWindow: "1 minute" } },
       schema: {
         tags: ["users"],
         summary: "Upload an image (claim proof, avatar). Multipart field: file",

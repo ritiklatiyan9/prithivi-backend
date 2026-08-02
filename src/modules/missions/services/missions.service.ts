@@ -16,7 +16,12 @@ import {
   type UserMissionDto,
 } from "../schemas/missions.schema.js";
 
-const completionInclude = { mission: true, user: true } as const;
+// List/review DTOs need only these fields. Avoid transferring long mission
+// descriptions and private user columns on every admin queue row.
+const completionInclude = {
+  mission: { select: { title: true, rewardCoins: true } },
+  user: { select: { email: true } },
+} as const;
 
 // ponytail: queries are simple enough to live here, prisma used directly — split out a repository if they grow.
 export class MissionsService {
@@ -34,7 +39,10 @@ export class MissionsService {
         where: { status: "PUBLISHED", deletedAt: null },
         orderBy: [{ sortOrder: "asc" }, { createdAt: "desc" }],
       }),
-      this.prisma.missionCompletion.findMany({ where: { userId } }),
+      this.prisma.missionCompletion.findMany({
+        where: { userId, mission: { status: "PUBLISHED", deletedAt: null } },
+        select: { missionId: true, status: true },
+      }),
     ]);
     const byMission = new Map(mine.map((c) => [c.missionId, c.status]));
     return missions.map((mission) => ({
@@ -149,10 +157,13 @@ export class MissionsService {
     };
 
     if (input.action === "REJECT") {
-      await this.prisma.missionCompletion.update({
-        where: { id: completionId },
+      const marked = await this.prisma.missionCompletion.updateMany({
+        where: { id: completionId, status: "PENDING" },
         data: { status: "REJECTED", ...reviewData },
       });
+      if (marked.count === 0) {
+        throw new ConflictError("Completion has already been reviewed");
+      }
       await this.notifications.enqueue({
         userId: completion.userId,
         type: "SYSTEM",
@@ -162,10 +173,13 @@ export class MissionsService {
     } else {
       const reward = completion.mission.rewardCoins;
       await this.prisma.$transaction(async (tx) => {
-        await tx.missionCompletion.update({
-          where: { id: completionId },
+        const marked = await tx.missionCompletion.updateMany({
+          where: { id: completionId, status: "PENDING" },
           data: { status: "APPROVED", ...reviewData },
         });
+        if (marked.count === 0) {
+          throw new ConflictError("Completion has already been reviewed");
+        }
         const wallet = await tx.wallet.upsert({
           where: { userId: completion.userId },
           create: { userId: completion.userId },

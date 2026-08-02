@@ -62,8 +62,8 @@ export class ClaimsService {
     }
 
     if (input.action === "REJECT") {
-      await this.prisma.claim.update({
-        where: { id: claimId },
+      const marked = await this.prisma.claim.updateMany({
+        where: { id: claimId, status: "PENDING" },
         data: {
           status: "REJECTED",
           reviewNote: input.reviewNote,
@@ -71,6 +71,9 @@ export class ClaimsService {
           reviewedAt: new Date(),
         },
       });
+      if (marked.count === 0) {
+        throw new ConflictError("Claim has already been reviewed");
+      }
 
       await this.notifications.enqueue({
         userId: claim.userId,
@@ -81,8 +84,8 @@ export class ClaimsService {
     } else {
       // Approve + credit the wallet atomically.
       await this.prisma.$transaction(async (tx) => {
-        await tx.claim.update({
-          where: { id: claimId },
+        const marked = await tx.claim.updateMany({
+          where: { id: claimId, status: "PENDING" },
           data: {
             status: "APPROVED",
             reviewNote: input.reviewNote,
@@ -90,6 +93,9 @@ export class ClaimsService {
             reviewedAt: new Date(),
           },
         });
+        if (marked.count === 0) {
+          throw new ConflictError("Claim has already been reviewed");
+        }
 
         const wallet = await tx.wallet.upsert({
           where: { userId: claim.userId },

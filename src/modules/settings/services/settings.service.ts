@@ -16,6 +16,11 @@ import {
 export class SettingsService {
   private cache: Map<string, string> | null = null;
   private loadedAt = 0;
+  private generation = 0;
+  private inFlightLoad: {
+    generation: number;
+    promise: Promise<Map<string, string>>;
+  } | null = null;
   private static readonly TTL_MS = 60_000;
 
   constructor(private readonly repo: SettingsRepository) {}
@@ -24,10 +29,32 @@ export class SettingsService {
     if (this.cache && Date.now() - this.loadedAt < SettingsService.TTL_MS) {
       return this.cache;
     }
-    const rows = await this.repo.findAll();
-    this.cache = new Map(rows.map((row) => [row.key, row.value]));
-    this.loadedAt = Date.now();
-    return this.cache;
+
+    // Several modules resolve a group of settings with Promise.all. Without
+    // single-flight protection, the first request after boot/expiry performed
+    // one identical SELECT per setting. Share that cold load across every
+    // caller so it remains exactly one database round trip.
+    const generation = this.generation;
+    if (this.inFlightLoad?.generation === generation) {
+      return this.inFlightLoad.promise;
+    }
+
+    const promise = this.repo
+      .findAll()
+      .then((rows) => new Map(rows.map((row) => [row.key, row.value])));
+    this.inFlightLoad = { generation, promise };
+
+    try {
+      const loaded = await promise;
+      // An admin update may finish while an older read is in flight. Never
+      // repopulate the cache with that stale snapshot; reload the new version.
+      if (generation !== this.generation) return this.overrides();
+      this.cache = loaded;
+      this.loadedAt = Date.now();
+      return loaded;
+    } finally {
+      if (this.inFlightLoad?.promise === promise) this.inFlightLoad = null;
+    }
   }
 
   private async raw(key: string): Promise<string> {
@@ -102,6 +129,7 @@ export class SettingsService {
 
     if (entries.length > 0) {
       await this.repo.upsertMany(entries, updatedById);
+      this.generation += 1;
       this.cache = null; // force reload on next read within this process
     }
     return this.list();

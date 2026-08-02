@@ -29,6 +29,10 @@ import { MissionsService } from "./modules/missions/services/missions.service.js
 import { GameService } from "./modules/game/services/game.service.js";
 import { RouletteService } from "./modules/roulette/services/roulette.service.js";
 import { CoinPurchaseService } from "./modules/payments/services/coin-purchase.service.js";
+import { LudoService } from "./modules/ludo/services/ludo.service.js";
+import { LudoSubscriptionService } from "./modules/ludo/services/ludo-subscription.service.js";
+import { LudoAdminService } from "./modules/ludo/services/ludo-admin.service.js";
+import { LudoRealtimeHub } from "./modules/ludo/sockets/ludo-hub.js";
 
 import { AuthController } from "./modules/auth/controllers/auth.controller.js";
 import { UsersController } from "./modules/users/controllers/users.controller.js";
@@ -47,6 +51,8 @@ import { MissionsController } from "./modules/missions/controllers/missions.cont
 import { GameController } from "./modules/game/controllers/game.controller.js";
 import { RouletteController } from "./modules/roulette/controllers/roulette.controller.js";
 import { CoinPurchaseController } from "./modules/payments/controllers/coin-purchase.controller.js";
+import { LudoController } from "./modules/ludo/controllers/ludo.controller.js";
+import { LudoAdminController } from "./modules/ludo/controllers/ludo-admin.controller.js";
 import { env } from "./config/env.js";
 
 export interface Container {
@@ -70,6 +76,10 @@ export interface Container {
   gameService: GameService;
   rouletteService: RouletteService;
   coinPurchaseService: CoinPurchaseService;
+  ludoService: LudoService;
+  ludoSubscriptionService: LudoSubscriptionService;
+  ludoAdminService: LudoAdminService;
+  ludoHub: LudoRealtimeHub;
 
   // controllers
   authController: AuthController;
@@ -89,6 +99,8 @@ export interface Container {
   gameController: GameController;
   rouletteController: RouletteController;
   coinPurchaseController: CoinPurchaseController;
+  ludoController: LudoController;
+  ludoAdminController: LudoAdminController;
 }
 
 declare module "fastify" {
@@ -169,11 +181,19 @@ export const buildContainer = (app: FastifyInstance): Container => {
     notificationsService,
     env,
   );
+  const ludoHub = new LudoRealtimeHub();
+  const ludoService = new LudoService(prisma, settingsService, notificationsService, ludoHub, env);
+  const ludoSubscriptionService = new LudoSubscriptionService(
+    prisma,
+    settingsService,
+    ludoService,
+    ludoHub,
+    env,
+  );
+  const ludoAdminService = new LudoAdminService(prisma, settingsService, ludoHub);
   const adminService = new AdminService(
     prisma,
     usersRepository,
-    campaignRepository,
-    claimsRepository,
     walletRepository,
     refreshTokenRepository,
   );
@@ -196,6 +216,10 @@ export const buildContainer = (app: FastifyInstance): Container => {
     gameService,
     rouletteService,
     coinPurchaseService,
+    ludoService,
+    ludoSubscriptionService,
+    ludoAdminService,
+    ludoHub,
 
     authController: new AuthController(authService),
     usersController: new UsersController(usersService),
@@ -214,5 +238,7 @@ export const buildContainer = (app: FastifyInstance): Container => {
     gameController: new GameController(gameService),
     rouletteController: new RouletteController(rouletteService),
     coinPurchaseController: new CoinPurchaseController(coinPurchaseService),
+    ludoController: new LudoController(ludoService, ludoSubscriptionService),
+    ludoAdminController: new LudoAdminController(ludoAdminService),
   };
 };

@@ -3,8 +3,6 @@ import { ForbiddenError, NotFoundError } from "../../../common/errors.js";
 import { buildMeta, type PaginationQuery } from "../../../common/pagination.js";
 import type { PageMeta } from "../../../common/response.js";
 import type { UsersRepository } from "../../users/repositories/users.repository.js";
-import type { CampaignRepository } from "../../campaign/repositories/campaign.repository.js";
-import type { ClaimsRepository } from "../../claims/repositories/claims.repository.js";
 import type { WalletRepository } from "../../wallet/repositories/wallet.repository.js";
 import type { RefreshTokenRepository } from "../../auth/repositories/refresh-token.repository.js";
 import { toPublicUser, type PublicUser } from "../../users/schemas/users.schema.js";
@@ -19,52 +17,64 @@ export class AdminService {
   constructor(
     private readonly prisma: PrismaClient,
     private readonly users: UsersRepository,
-    private readonly campaigns: CampaignRepository,
-    private readonly claims: ClaimsRepository,
     private readonly wallets: WalletRepository,
     private readonly refreshTokens: RefreshTokenRepository,
   ) {}
 
   async stats(): Promise<AdminStats> {
-    const [
-      totalUsers,
-      activeCampaigns,
-      pendingClaims,
-      approvedClaims,
-      totalBalance,
-      pendingSubmissions,
-      pendingRedemptions,
-      pendingRedemptionCoins,
-      fulfilledRedemptions,
-      pendingMissionCompletions,
-      totalReferrals,
-    ] = await Promise.all([
-      this.users.count(),
-      this.campaigns.countByStatus("ACTIVE"),
-      this.claims.countByStatus("PENDING"),
-      this.claims.countByStatus("APPROVED"),
-      this.wallets.totalBalance(),
-      this.prisma.offerSubmission.count({ where: { status: "PENDING" } }),
-      this.prisma.redemption.count({ where: { status: "PENDING" } }),
-      this.prisma.redemption.aggregate({ where: { status: "PENDING" }, _sum: { coins: true } }),
-      this.prisma.redemption.count({ where: { status: "FULFILLED" } }),
-      this.prisma.missionCompletion.count({ where: { status: "PENDING" } }),
-      this.prisma.user.count({ where: { referredById: { not: null } } }),
-    ]);
+    // Dashboard load used to open eleven concurrent Prisma queries. On a
+    // serverless Postgres connection that amplified pool pressure and made the
+    // first admin screen as slow as its slowest round trip. PostgreSQL can
+    // compute the same independent aggregates in one request.
+    const [row] = await this.prisma.$queryRaw<
+      Array<{
+        totalUsers: number;
+        activeCampaigns: number;
+        pendingClaims: number;
+        approvedClaims: number;
+        totalWalletBalance: number;
+        pendingSubmissions: number;
+        pendingRedemptions: number;
+        coinsInPendingRedemptions: number;
+        fulfilledRedemptions: number;
+        pendingMissionCompletions: number;
+        totalReferrals: number;
+      }>
+    >`
+      SELECT
+        (SELECT COUNT(*)::integer FROM users) AS "totalUsers",
+        (SELECT COUNT(*)::integer FROM campaigns WHERE status = 'ACTIVE') AS "activeCampaigns",
+        (SELECT COUNT(*)::integer FROM claims WHERE status = 'PENDING') AS "pendingClaims",
+        (SELECT COUNT(*)::integer FROM claims WHERE status = 'APPROVED') AS "approvedClaims",
+        COALESCE((SELECT SUM(balance)::double precision FROM wallets), 0) AS "totalWalletBalance",
+        (SELECT COUNT(*)::integer FROM offer_submissions WHERE status = 'PENDING') AS "pendingSubmissions",
+        (SELECT COUNT(*)::integer FROM redemptions WHERE status = 'PENDING') AS "pendingRedemptions",
+        COALESCE(
+          (SELECT SUM(coins)::double precision FROM redemptions WHERE status = 'PENDING'),
+          0
+        ) AS "coinsInPendingRedemptions",
+        (SELECT COUNT(*)::integer FROM redemptions WHERE status = 'FULFILLED') AS "fulfilledRedemptions",
+        (SELECT COUNT(*)::integer FROM mission_completions WHERE status = 'PENDING') AS "pendingMissionCompletions",
+        (SELECT COUNT(*)::integer FROM users WHERE "referredById" IS NOT NULL) AS "totalReferrals"
+    `;
 
-    return {
-      totalUsers,
-      activeCampaigns,
-      pendingClaims,
-      approvedClaims,
-      totalWalletBalance: totalBalance?.toNumber() ?? 0,
-      pendingSubmissions,
-      pendingRedemptions,
-      coinsInPendingRedemptions: Number(pendingRedemptionCoins._sum.coins ?? 0),
-      fulfilledRedemptions,
-      pendingMissionCompletions,
-      totalReferrals,
-    };
+    // SELECT without a FROM always returns exactly one row, but retain an
+    // explicit fallback so a mocked/aborted adapter cannot crash serialization.
+    return (
+      row ?? {
+        totalUsers: 0,
+        activeCampaigns: 0,
+        pendingClaims: 0,
+        approvedClaims: 0,
+        totalWalletBalance: 0,
+        pendingSubmissions: 0,
+        pendingRedemptions: 0,
+        coinsInPendingRedemptions: 0,
+        fulfilledRedemptions: 0,
+        pendingMissionCompletions: 0,
+        totalReferrals: 0,
+      }
+    );
   }
 
   async listUsers(query: ListUsersQuery): Promise<{ items: PublicUser[]; meta: PageMeta }> {

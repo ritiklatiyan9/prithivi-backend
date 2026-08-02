@@ -1,6 +1,11 @@
 import type { FastifyInstance } from "fastify";
 import type { User } from "@prisma/client";
-import { AppError, ForbiddenError, NotFoundError, UnauthorizedError } from "../../../common/errors.js";
+import {
+  AppError,
+  ForbiddenError,
+  NotFoundError,
+  UnauthorizedError,
+} from "../../../common/errors.js";
 import { env } from "../../../config/env.js";
 import { generateOpaqueToken, hashToken, parseDuration } from "../../../utils/tokens.js";
 import type { RefreshTokenRepository } from "../repositories/refresh-token.repository.js";
@@ -24,7 +29,11 @@ export class AuthService {
    */
   async signInWithFirebaseIdToken(idToken: string): Promise<FirebaseAuthResult> {
     if (!this.app.firebaseAuth) {
-      throw new AppError("Firebase authentication is not configured", 503, "FIREBASE_NOT_CONFIGURED");
+      throw new AppError(
+        "Firebase authentication is not configured",
+        503,
+        "FIREBASE_NOT_CONFIGURED",
+      );
     }
 
     let decoded;
@@ -63,9 +72,19 @@ export class AuthService {
       throw new ForbiddenError("This account has been deactivated");
     }
 
-    // Rotation: every refresh token is single-use.
-    await this.refreshTokens.revoke(record.id);
-    return this.issueTokens(record.user);
+    // Rotation is one DB transaction. Concurrent app/web retries cannot both
+    // consume the same token, and a failed replacement insert cannot strand a
+    // legitimate session with its old token already revoked.
+    const prepared = this.prepareTokens(record.user);
+    const rotated = await this.refreshTokens.rotate(record.id, {
+      userId: record.user.id,
+      tokenHash: hashToken(prepared.tokens.refreshToken),
+      expiresAt: prepared.expiresAt,
+    });
+    if (!rotated) {
+      throw new UnauthorizedError("Invalid or expired refresh token");
+    }
+    return prepared.tokens;
   }
 
   async logout(refreshToken: string): Promise<void> {
@@ -136,6 +155,16 @@ export class AuthService {
   }
 
   private async issueTokens(user: User): Promise<AuthTokens> {
+    const prepared = this.prepareTokens(user);
+    await this.refreshTokens.create(
+      user.id,
+      hashToken(prepared.tokens.refreshToken),
+      prepared.expiresAt,
+    );
+    return prepared.tokens;
+  }
+
+  private prepareTokens(user: User): { tokens: AuthTokens; expiresAt: Date } {
     const accessToken = this.app.jwt.sign(
       { sub: user.id, email: user.email, role: user.role },
       { expiresIn: env.JWT_ACCESS_EXPIRES_IN },
@@ -143,8 +172,9 @@ export class AuthService {
 
     const refreshToken = generateOpaqueToken();
     const expiresAt = new Date(Date.now() + parseDuration(env.JWT_REFRESH_EXPIRES_IN));
-    await this.refreshTokens.create(user.id, hashToken(refreshToken), expiresAt);
-
-    return { accessToken, refreshToken, user: toPublicUser(user) };
+    return {
+      tokens: { accessToken, refreshToken, user: toPublicUser(user) },
+      expiresAt,
+    };
   }
 }

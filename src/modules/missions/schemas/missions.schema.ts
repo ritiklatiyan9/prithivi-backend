@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { Mission, MissionCompletion, User } from "@prisma/client";
+import type { Mission, MissionCompletion } from "@prisma/client";
 
 export const missionStatusSchema = z.enum(["DRAFT", "PUBLISHED", "ARCHIVED"]);
 export const completionStatusSchema = z.enum(["PENDING", "APPROVED", "REJECTED"]);
@@ -33,7 +33,10 @@ export interface UserMissionDto extends MissionDto {
   myCompletionStatus: "PENDING" | "APPROVED" | "REJECTED" | null;
 }
 
-export type CompletionWithRelations = MissionCompletion & { mission: Mission; user: User };
+export type CompletionWithRelations = MissionCompletion & {
+  mission: Pick<Mission, "title" | "rewardCoins">;
+  user: { email: string };
+};
 
 export interface CompletionDto {
   id: string;

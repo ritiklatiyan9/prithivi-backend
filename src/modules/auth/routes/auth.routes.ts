@@ -15,6 +15,7 @@ export const authRoutes = async (app: FastifyInstance): Promise<void> => {
   app.post<{ Body: FirebaseSignInInput }>(
     "/firebase",
     {
+      config: { rateLimit: { max: 15, timeWindow: "1 minute" } },
       schema: {
         tags: ["auth"],
         summary: "Sign in with a Firebase ID token (app + admin)",
@@ -27,6 +28,7 @@ export const authRoutes = async (app: FastifyInstance): Promise<void> => {
   app.post<{ Body: RefreshTokenInput }>(
     "/refresh",
     {
+      config: { rateLimit: { max: 30, timeWindow: "1 minute" } },
       schema: {
         tags: ["auth"],
         summary: "Exchange a refresh token for new tokens (rotation)",
@@ -59,8 +61,7 @@ export const authRoutes = async (app: FastifyInstance): Promise<void> => {
       config: { rateLimit: { max: 30, timeWindow: "1 minute" } },
       schema: {
         tags: ["auth"],
-        summary:
-          "Token pair for the embedded website, injected by the app via the WebView bridge",
+        summary: "Token pair for the embedded website, injected by the app via the WebView bridge",
         security: [{ bearerAuth: [] }],
       },
     },
@@ -83,6 +84,7 @@ export const authRoutes = async (app: FastifyInstance): Promise<void> => {
   app.post<{ Body: RefreshTokenInput }>(
     "/logout",
     {
+      config: { rateLimit: { max: 30, timeWindow: "1 minute" } },
       schema: {
         tags: ["auth"],
         summary: "Revoke a refresh token",

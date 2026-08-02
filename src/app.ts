@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyInstance } from "fastify";
+import websocket from "@fastify/websocket";
+import rawBody from "fastify-raw-body";
 import { serializerCompiler, validatorCompiler } from "fastify-type-provider-zod";
 import { env } from "./config/env.js";
 import { HEADERS } from "./config/constants.js";
@@ -49,6 +51,8 @@ export const buildApp = async (): Promise<FastifyInstance> => {
   await app.register(firebasePlugin);
   await app.register(staticPlugin);
   await app.register(auditPlugin);
+  await app.register(websocket, { options: { maxPayload: 64 * 1024 } });
+  await app.register(rawBody, { global: false, encoding: false, runFirst: true });
 
   // Composition root — repositories, services, controllers.
   const container = buildContainer(app);

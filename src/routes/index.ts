@@ -16,6 +16,8 @@ import { missionsRoutes } from "../modules/missions/routes/missions.routes.js";
 import { gameRoutes } from "../modules/game/routes/game.routes.js";
 import { rouletteRoutes } from "../modules/roulette/routes/roulette.routes.js";
 import { coinPurchaseRoutes } from "../modules/payments/routes/coin-purchase.routes.js";
+import { ludoRoutes } from "../modules/ludo/routes/ludo.routes.js";
+import { ludoAdminRoutes } from "../modules/ludo/routes/ludo-admin.routes.js";
 import { env } from "../config/env.js";
 
 export const registerRoutes = async (app: FastifyInstance): Promise<void> => {
@@ -58,6 +60,8 @@ export const registerRoutes = async (app: FastifyInstance): Promise<void> => {
       await api.register(gameRoutes, { prefix: "/game" });
       await api.register(rouletteRoutes, { prefix: "/game" });
       await api.register(coinPurchaseRoutes, { prefix: "/wallet/coin-purchases" });
+      await api.register(ludoRoutes, { prefix: "/ludo" });
+      await api.register(ludoAdminRoutes, { prefix: "/admin/game" });
     },
     { prefix: env.API_PREFIX },
   );

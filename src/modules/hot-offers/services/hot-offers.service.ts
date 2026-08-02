@@ -46,7 +46,19 @@ const RANGE_CONFIG = {
   monthly: { days: 365, bucket: "month" },
 } as const;
 
+interface PublicCacheEntry {
+  generation: number;
+  expiresAt: number;
+  value?: unknown;
+  promise?: Promise<unknown>;
+}
+
 export class HotOffersService {
+  private readonly publicCache = new Map<string, PublicCacheEntry>();
+  private publicCacheGeneration = 0;
+  private static readonly PUBLIC_CACHE_TTL_MS = 30_000;
+  private static readonly PUBLIC_CACHE_MAX_ENTRIES = 200;
+
   constructor(
     private readonly repo: HotOffersRepository,
     private readonly notifications: NotificationsService,
@@ -56,14 +68,18 @@ export class HotOffersService {
   // ---- public: categories & feedback pages ----
 
   async listPublicCategories(): Promise<CategoryDto[]> {
-    const categories = await this.repo.listCategories({ publishedOnly: true });
-    return categories.map(toCategoryDto);
+    return this.cachedPublic("categories", async () => {
+      const categories = await this.repo.listCategories({ publishedOnly: true });
+      return categories.map(toCategoryDto);
+    });
   }
 
   async getPublicFeedbackPage(categorySlug: string): Promise<FeedbackPageDto> {
-    const page = await this.repo.findFeedbackPageByCategorySlug(categorySlug, true);
-    if (!page) throw new NotFoundError("Feedback page not found");
-    return toFeedbackPageDto(page);
+    return this.cachedPublic(`feedback:${categorySlug}`, async () => {
+      const page = await this.repo.findFeedbackPageByCategorySlug(categorySlug, true);
+      if (!page) throw new NotFoundError("Feedback page not found");
+      return toFeedbackPageDto(page);
+    });
   }
 
   // ---- public: offers ----
@@ -71,14 +87,26 @@ export class HotOffersService {
   async listPublicOffers(
     query: ListOffersQuery,
   ): Promise<{ items: OfferCardDto[]; meta: PageMeta }> {
-    const [offers, total] = await this.repo.listOffers(query, { publishedOnly: true });
-    return { items: offers.map(toOfferCardDto), meta: buildMeta(query, total) };
+    const key = `offers:${JSON.stringify([
+      query.page,
+      query.limit,
+      query.category ?? "",
+      query.search ?? "",
+      query.sort,
+      query.product ?? "",
+    ])}`;
+    return this.cachedPublic(key, async () => {
+      const [offers, total] = await this.repo.listOffers(query, { publishedOnly: true });
+      return { items: offers.map(toOfferCardDto), meta: buildMeta(query, total) };
+    });
   }
 
   async getPublicOffer(slug: string): Promise<OfferDetailsDto> {
-    const offer = await this.repo.findOfferBySlug(slug, true);
-    if (!offer) throw new NotFoundError("Offer not found");
-    return toOfferDetailsDto(offer);
+    return this.cachedPublic(`offer:${slug}`, async () => {
+      const offer = await this.repo.findOfferBySlug(slug, true);
+      if (!offer) throw new NotFoundError("Offer not found");
+      return toOfferDetailsDto(offer);
+    });
   }
 
   /** A newly generated suggested review comment for a published offer. */
@@ -119,6 +147,7 @@ export class HotOffersService {
       featured: input.featured,
       status: input.status,
     });
+    this.invalidatePublicCatalog();
     return toCategoryDto(category);
   }
 
@@ -136,6 +165,7 @@ export class HotOffersService {
       featured: input.featured,
       status: input.status,
     });
+    this.invalidatePublicCatalog();
     return toCategoryDto(category);
   }
 
@@ -143,6 +173,7 @@ export class HotOffersService {
     const existing = await this.repo.findCategoryById(id);
     if (!existing) throw new NotFoundError("Category not found");
     await this.repo.softDeleteCategory(id, `${existing.slug}--deleted--${Date.now()}`);
+    this.invalidatePublicCatalog();
   }
 
   // ---- admin: feedback pages ----
@@ -170,6 +201,7 @@ export class HotOffersService {
       websiteUrl: input.websiteUrl,
       status: input.status,
     });
+    this.invalidatePublicCatalog();
     return toFeedbackPageDto(page);
   }
 
@@ -194,6 +226,7 @@ export class HotOffersService {
 
     const slug = await this.uniqueOfferSlug(input.slug ?? slugify(input.title));
     const offer = await this.repo.createOffer({ ...this.toOfferData(input), slug });
+    this.invalidatePublicCatalog();
     return toOfferDetailsDto(offer);
   }
 
@@ -206,6 +239,7 @@ export class HotOffersService {
 
     const slug = await this.uniqueOfferSlug(input.slug ?? existing.slug, id);
     const offer = await this.repo.updateOffer(id, { ...this.toOfferData(input), slug });
+    this.invalidatePublicCatalog();
     return toOfferDetailsDto(offer);
   }
 
@@ -213,6 +247,69 @@ export class HotOffersService {
     const existing = await this.repo.findOfferById(id);
     if (!existing) throw new NotFoundError("Offer not found");
     await this.repo.softDeleteOffer(id, `${existing.slug}--deleted--${Date.now()}`);
+    this.invalidatePublicCatalog();
+  }
+
+  /**
+   * Small process-local read-through cache for immutable public DTOs. Render's
+   * API and Postgres are separated by a high-latency network path, so avoiding
+   * that hop on catalog navigation is substantially more valuable than
+   * micro-optimizing DTO mapping. Concurrent cache misses share one promise.
+   */
+  private async cachedPublic<T>(key: string, load: () => Promise<T>): Promise<T> {
+    const now = Date.now();
+    const existing = this.publicCache.get(key);
+    if (
+      existing?.generation === this.publicCacheGeneration &&
+      existing.value !== undefined &&
+      existing.expiresAt > now
+    ) {
+      return existing.value as T;
+    }
+    if (existing?.generation === this.publicCacheGeneration && existing.promise) {
+      return existing.promise as Promise<T>;
+    }
+
+    const generation = this.publicCacheGeneration;
+    const promise = load();
+    this.publicCache.set(key, {
+      generation,
+      expiresAt: now + HotOffersService.PUBLIC_CACHE_TTL_MS,
+      promise,
+    });
+
+    try {
+      const value = await promise;
+      if (generation === this.publicCacheGeneration) {
+        this.prunePublicCache(now);
+        this.publicCache.set(key, {
+          generation,
+          expiresAt: Date.now() + HotOffersService.PUBLIC_CACHE_TTL_MS,
+          value,
+        });
+      }
+      return value;
+    } catch (error) {
+      const current = this.publicCache.get(key);
+      if (current?.promise === promise) this.publicCache.delete(key);
+      throw error;
+    }
+  }
+
+  private prunePublicCache(now: number): void {
+    for (const [key, entry] of this.publicCache) {
+      if (!entry.promise && entry.expiresAt <= now) this.publicCache.delete(key);
+    }
+    while (this.publicCache.size >= HotOffersService.PUBLIC_CACHE_MAX_ENTRIES) {
+      const oldest = this.publicCache.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.publicCache.delete(oldest);
+    }
+  }
+
+  private invalidatePublicCatalog(): void {
+    this.publicCacheGeneration += 1;
+    this.publicCache.clear();
   }
 
   /** Append -2, -3, … until the slug is free (excluding the row being updated). */
@@ -399,15 +496,15 @@ export class HotOffersService {
 
     // The images were appended after the submission row was written, so the
     // in-memory relation is stale — respond with them included.
-    return toSubmissionDto({ ...submission, images: hashed.map(({ url }) => ({ url })).concat(submission.images) });
+    return toSubmissionDto({
+      ...submission,
+      images: hashed.map(({ url }) => ({ url })).concat(submission.images),
+    });
   }
 
   /** The caller's submission for a specific offer (or null) — drives the
    *  inline status shown on the game detail screen. */
-  async getMySubmissionForOffer(
-    userId: string,
-    offerId: string,
-  ): Promise<SubmissionDto | null> {
+  async getMySubmissionForOffer(userId: string, offerId: string): Promise<SubmissionDto | null> {
     const submission = await this.repo.findSubmissionWithOffer(offerId, userId);
     return submission ? toSubmissionDto(submission) : null;
   }
@@ -422,13 +519,16 @@ export class HotOffersService {
     const submission = await this.repo.findSubmissionById(id);
     if (!submission) throw new NotFoundError("Submission not found");
     if (submission.status === "PENDING") {
-      throw new BadRequestError("This submission is awaiting review — approve or reject it instead");
+      throw new BadRequestError(
+        "This submission is awaiting review — approve or reject it instead",
+      );
     }
     if (submission.status === "CANCELLED") {
       throw new BadRequestError("The user can already submit again for this offer");
     }
     const reopened = await this.repo.reopenSubmission(id, reviewerId);
-    if (!reopened) throw new ConflictError("Submission was updated concurrently — refresh and retry");
+    if (!reopened)
+      throw new ConflictError("Submission was updated concurrently — refresh and retry");
     return toSubmissionDto(reopened);
   }
 
