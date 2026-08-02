@@ -30,6 +30,7 @@ import type {
   LudoServerEventType,
 } from "../schemas/ludo.schema.js";
 import type { LudoRealtimeHub } from "../sockets/ludo-hub.js";
+import { ludoPurchaseAvailability } from "./ludo-subscription-catalog.js";
 
 interface LudoRuntimeConfig {
   enabled: boolean;
@@ -237,8 +238,8 @@ export class LudoService {
     return {
       plan,
       status: active ? "ACTIVE" : "FREE",
-      startsAt: active ? row.startsAt?.toISOString() ?? null : null,
-      expiresAt: active ? row.expiresAt?.toISOString() ?? null : null,
+      startsAt: active ? (row.startsAt?.toISOString() ?? null) : null,
+      expiresAt: active ? (row.expiresAt?.toISOString() ?? null) : null,
       subscriptionId: active ? row.sourceSubscriptionId : null,
       entitlements: {
         quickChat: true,
@@ -261,14 +262,19 @@ export class LudoService {
   }
 
   async getConfig(userId: string): Promise<Record<string, unknown>> {
-    const [config, entitlement] = await Promise.all([
+    const [config, entitlement, plusPlanId, proPlanId] = await Promise.all([
       this.runtimeConfig(),
       this.effectiveEntitlement(userId),
+      this.settings.getString("game.ludo.plusPlanId"),
+      this.settings.getString("game.ludo.proPlanId"),
     ]);
     const voiceIceServers =
-      config.voiceEnabled && entitlement.entitlements.voiceChat
-        ? this.voiceIceServers()
-        : [];
+      config.voiceEnabled && entitlement.entitlements.voiceChat ? this.voiceIceServers() : [];
+    const purchaseAvailability = ludoPurchaseAvailability(
+      this.env,
+      config.subscriptionPurchaseEnabled,
+      { plusPlanId, proPlanId },
+    );
     return {
       enabled: config.enabled,
       matchmakingEnabled: config.matchmakingEnabled,
@@ -296,7 +302,23 @@ export class LudoService {
         textChatEnabled: config.textChatEnabled,
         voiceEnabled: config.voiceEnabled,
       },
-      subscriptionPurchaseEnabled: config.subscriptionPurchaseEnabled,
+      subscriptionPurchaseEnabled: purchaseAvailability.purchaseEnabled,
+      purchases: {
+        enabled: purchaseAvailability.purchaseEnabled,
+        checkoutConfigured: purchaseAvailability.checkoutConfigured,
+        plans: {
+          PLUS: {
+            purchasable: purchaseAvailability.plans.PLUS.purchasable,
+            checkoutConfigured: purchaseAvailability.plans.PLUS.checkoutConfigured,
+            availabilityReason: purchaseAvailability.plans.PLUS.availabilityReason,
+          },
+          PRO: {
+            purchasable: purchaseAvailability.plans.PRO.purchasable,
+            checkoutConfigured: purchaseAvailability.plans.PRO.checkoutConfigured,
+            availabilityReason: purchaseAvailability.plans.PRO.availabilityReason,
+          },
+        },
+      },
       minimumSupportedAppVersion: config.minimumSupportedAppVersion || null,
       entitlement,
       voiceIceServers,
@@ -325,7 +347,10 @@ export class LudoService {
   }
 
   async assertSocketUser(userId: string): Promise<void> {
-    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { isActive: true } });
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { isActive: true },
+    });
     if (!user?.isActive) throw new ForbiddenError("This account is not allowed to play");
     await this.assertNotRestricted(userId, "GAME_ACCESS");
   }
@@ -348,15 +373,23 @@ export class LudoService {
   private async assertAvailable(mode?: LudoMode): Promise<LudoRuntimeConfig> {
     const config = await this.runtimeConfig();
     if (!config.enabled) throw new ForbiddenError("Ludo is currently disabled");
-    if (config.maintenanceMode) throw new AppError("Ludo is under maintenance", 503, "LUDO_MAINTENANCE");
+    if (config.maintenanceMode)
+      throw new AppError("Ludo is under maintenance", 503, "LUDO_MAINTENANCE");
     if (!config.matchmakingEnabled && mode) throw new ForbiddenError("Matchmaking is disabled");
-    if (mode === "TWO_PLAYER" && !config.twoPlayerEnabled) throw new ForbiddenError("Two-player mode is disabled");
-    if (mode === "THREE_PLAYER" && !config.threePlayerEnabled) throw new ForbiddenError("Three-player mode is disabled");
-    if (mode === "FOUR_PLAYER" && !config.fourPlayerEnabled) throw new ForbiddenError("Four-player mode is disabled");
+    if (mode === "TWO_PLAYER" && !config.twoPlayerEnabled)
+      throw new ForbiddenError("Two-player mode is disabled");
+    if (mode === "THREE_PLAYER" && !config.threePlayerEnabled)
+      throw new ForbiddenError("Three-player mode is disabled");
+    if (mode === "FOUR_PLAYER" && !config.fourPlayerEnabled)
+      throw new ForbiddenError("Four-player mode is disabled");
     return config;
   }
 
-  private async lock(tx: Prisma.TransactionClient, key: string, namespace = 20260802): Promise<void> {
+  private async lock(
+    tx: Prisma.TransactionClient,
+    key: string,
+    namespace = 20260802,
+  ): Promise<void> {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key}, ${namespace}))`;
   }
 
@@ -409,10 +442,11 @@ export class LudoService {
       });
     });
 
-    const joined = this.hub.event(
-      "matchmaking.joined",
-      { queueId: entry.id, mode: entry.mode, joinedAt: entry.joinedAt.toISOString() },
-    );
+    const joined = this.hub.event("matchmaking.joined", {
+      queueId: entry.id,
+      mode: entry.mode,
+      joinedAt: entry.joinedAt.toISOString(),
+    });
     this.hub.send(userId, joined);
     const match = await this.tryCreateMatch(input.mode, config);
     if (match) this.publishMatchFound(match);
@@ -431,7 +465,10 @@ export class LudoService {
     return event;
   }
 
-  private async tryCreateMatch(mode: LudoGameMode, config: LudoRuntimeConfig): Promise<MatchCreation | null> {
+  private async tryCreateMatch(
+    mode: LudoGameMode,
+    config: LudoRuntimeConfig,
+  ): Promise<MatchCreation | null> {
     const online = this.hub.onlineUserIds();
     if (online.length < roomPlayerCount(mode)) return null;
     return this.prisma.$transaction(
@@ -502,7 +539,10 @@ export class LudoService {
           },
         });
         const claimed = await tx.ludoQueueEntry.updateMany({
-          where: { userId: { in: candidates.map((candidate) => candidate.userId) }, status: "QUEUED" },
+          where: {
+            userId: { in: candidates.map((candidate) => candidate.userId) },
+            status: "QUEUED",
+          },
           data: { status: "MATCHED", matchedRoomId: roomId },
         });
         if (claimed.count !== candidates.length) {
@@ -553,7 +593,8 @@ export class LudoService {
       const duplicate = await tx.ludoAction.findUnique({
         where: { roomId_actionId: { roomId: gameId, actionId } },
       });
-      if (duplicate) return { event: duplicate.serverEvent as unknown as LudoServerEvent, userIds: [] };
+      if (duplicate)
+        return { event: duplicate.serverEvent as unknown as LudoServerEvent, userIds: [] };
       const room = await tx.ludoRoom.findUnique({
         where: { id: gameId },
         include: { players: true },
@@ -606,9 +647,7 @@ export class LudoService {
           ...(allAccepted
             ? {
                 status: "WAITING_READY",
-                acceptanceDeadline: new Date(
-                  now.getTime() + config.matchAcceptanceSeconds * 1000,
-                ),
+                acceptanceDeadline: new Date(now.getTime() + config.matchAcceptanceSeconds * 1000),
               }
             : {}),
         },
@@ -642,7 +681,8 @@ export class LudoService {
       const duplicate = await tx.ludoAction.findUnique({
         where: { roomId_actionId: { roomId: gameId, actionId } },
       });
-      if (duplicate) return { event: duplicate.serverEvent as unknown as LudoServerEvent, userIds: [] };
+      if (duplicate)
+        return { event: duplicate.serverEvent as unknown as LudoServerEvent, userIds: [] };
       const room = await tx.ludoRoom.findUnique({
         where: { id: gameId },
         include: { players: true },
@@ -861,8 +901,7 @@ export class LudoService {
                   ? "RECONNECTING"
                   : "DISCONNECTED",
           plan: this.effectivePlan(player.user.ludoEntitlement),
-          finishedPosition:
-            byUser.get(player.userId)?.finishedPosition ?? player.finishedPosition,
+          finishedPosition: byUser.get(player.userId)?.finishedPosition ?? player.finishedPosition,
         })),
       finishOrder: state.finishOrder,
       config: state.config,
@@ -901,7 +940,12 @@ export class LudoService {
     });
     return this.snapshot({
       ...room,
-      status: state.status === "COMPLETED" ? "COMPLETED" : state.status === "ACTIVE" ? "ACTIVE" : room.status,
+      status:
+        state.status === "COMPLETED"
+          ? "COMPLETED"
+          : state.status === "ACTIVE"
+            ? "ACTIVE"
+            : room.status,
       stateVersion,
       state: state as unknown as Prisma.JsonValue,
       turnDeadline: state.status === "ACTIVE" ? turnDeadline : room.turnDeadline,
@@ -970,11 +1014,16 @@ export class LudoService {
           resumeTokenHash: hashToken(rotated),
           lastAcknowledgedVersion: Math.min(lastAcknowledgedStateVersion, player.room.stateVersion),
           ...(player.status === "DISCONNECTED"
-            ? { status: player.room.status === "ACTIVE" ? "ACTIVE" : "READY", disconnectedAt: null, reconnectDeadline: null }
+            ? {
+                status: player.room.status === "ACTIVE" ? "ACTIVE" : "READY",
+                disconnectedAt: null,
+                reconnectDeadline: null,
+              }
             : {}),
         },
       });
-      if (changed.count !== 1) throw new ConflictError("Resume credential changed; reconnect again");
+      if (changed.count !== 1)
+        throw new ConflictError("Resume credential changed; reconnect again");
       return { player, rotated };
     });
     if (!resumed) return null;
@@ -1047,7 +1096,10 @@ export class LudoService {
           finishedPosition: mine?.finishedPosition ?? null,
           durationSeconds:
             room.startedAt && room.completedAt
-              ? Math.max(0, Math.round((room.completedAt.getTime() - room.startedAt.getTime()) / 1000))
+              ? Math.max(
+                  0,
+                  Math.round((room.completedAt.getTime() - room.startedAt.getTime()) / 1000),
+                )
               : null,
           captures: mine?.captures ?? 0,
           diceRolls: mine?.diceRolls ?? 0,
@@ -1108,12 +1160,15 @@ export class LudoService {
       actionId,
       expectedStateVersion,
       actionType: "dice.roll.request",
+      requireUnexpiredTurnDeadline: true,
       mutate: (state, now) => {
         let outcome;
         try {
           outcome = applyRoll(state, userId, dice, now.toISOString());
         } catch (error) {
-          throw new BadRequestError(error instanceof Error ? error.message : "Invalid dice request");
+          throw new BadRequestError(
+            error instanceof Error ? error.message : "Invalid dice request",
+          );
         }
         const currentTurnUserId = outcome.state.players.find(
           (player) => player.seat === outcome.state.currentTurnSeat,
@@ -1152,6 +1207,7 @@ export class LudoService {
       expectedStateVersion,
       actionType: "pawn.move.request",
       clientPayload: { pawnIndex },
+      requireUnexpiredTurnDeadline: true,
       mutate: (state, now) => {
         let outcome;
         try {
@@ -1165,7 +1221,10 @@ export class LudoService {
         const actor = outcome.state.players.find((player) => player.userId === userId)!;
         return {
           state: outcome.state,
-          eventType: outcome.state.status === "COMPLETED" ? ("game.finished" as const) : ("pawn.moved" as const),
+          eventType:
+            outcome.state.status === "COMPLETED"
+              ? ("game.finished" as const)
+              : ("pawn.moved" as const),
           payload: {
             userId,
             pawnIndex,
@@ -1213,8 +1272,11 @@ export class LudoService {
       forfeitedUserId?: string;
     };
     requireExpiredTurnDeadline?: boolean;
+    requireUnexpiredTurnDeadline?: boolean;
   }): Promise<LudoServerEvent> {
-    const config = await this.assertAvailable();
+    // Availability flags gate discovery and new queues only. Once a room is
+    // ACTIVE it uses its persisted config snapshot and must not consult a
+    // mutable master-disable or maintenance flag on the hot path.
     const result: RoomMutationResult = await this.prisma.$transaction(
       async (tx) => {
         await this.lock(tx, `ludo:room:${params.gameId}`, 20260804);
@@ -1241,7 +1303,8 @@ export class LudoService {
           throw new NotFoundError("Ludo room not found");
         }
         if (room.status !== "ACTIVE") throw new ConflictError("This Ludo match is not active");
-        if (room.stateVersion !== params.expectedStateVersion) this.versionConflict(room.stateVersion);
+        if (room.stateVersion !== params.expectedStateVersion)
+          this.versionConflict(room.stateVersion);
         const membership = room.players.find((player) => player.userId === params.userId)!;
         if (membership.status !== "ACTIVE" && membership.status !== "DISCONNECTED") {
           throw new ForbiddenError("This player can no longer act in the match");
@@ -1253,21 +1316,40 @@ export class LudoService {
         ) {
           throw new ConflictError("This turn has not expired");
         }
+        if (
+          params.requireUnexpiredTurnDeadline &&
+          (!room.turnDeadline || room.turnDeadline.getTime() <= now.getTime())
+        ) {
+          throw new AppError(
+            "The authoritative turn deadline has expired",
+            409,
+            "TURN_DEADLINE_EXPIRED",
+            {
+              turnDeadlineAt: room.turnDeadline?.toISOString() ?? null,
+              serverTime: now.toISOString(),
+            },
+          );
+        }
         const mutation = params.mutate(asState(room.state), now, membership);
         const nextVersion = room.stateVersion + 1;
         const completed = mutation.state.status === "COMPLETED";
+        const frozenConfig = room.configSnapshot as unknown as Partial<LudoRuntimeConfig>;
+        const turnDurationSeconds =
+          typeof frozenConfig.turnDurationSeconds === "number" &&
+          Number.isInteger(frozenConfig.turnDurationSeconds) &&
+          frozenConfig.turnDurationSeconds > 0
+            ? frozenConfig.turnDurationSeconds
+            : 30;
         const nextTurnDeadline = completed
           ? null
-          : new Date(now.getTime() + config.turnDurationSeconds * 1000);
+          : new Date(now.getTime() + turnDurationSeconds * 1000);
         await tx.ludoRoom.update({
           where: { id: params.gameId },
           data: {
             state: asJson(mutation.state),
             stateVersion: nextVersion,
             turnDeadline: nextTurnDeadline,
-            ...(completed
-              ? { status: "COMPLETED", completedAt: now }
-              : {}),
+            ...(completed ? { status: "COMPLETED", completedAt: now } : {}),
           },
         });
         if (
@@ -1291,9 +1373,7 @@ export class LudoService {
                 ? { pawnsCompleted: mutation.pawnsCompleted }
                 : {}),
               ...(mutation.resetTurnTimeouts ? { turnTimeouts: 0 } : {}),
-              ...(mutation.timeoutStrikeIncrement
-                ? { turnTimeouts: { increment: 1 } }
-                : {}),
+              ...(mutation.timeoutStrikeIncrement ? { turnTimeouts: { increment: 1 } } : {}),
               ...(mutation.forfeitedUserId === params.userId
                 ? {
                     status: "FORFEITED",
@@ -1326,12 +1406,7 @@ export class LudoService {
         const currentTurn = mutation.state.players.find(
           (player) => player.seat === mutation.state.currentTurnSeat,
         );
-        const snapshot = this.compactSnapshot(
-          room,
-          mutation.state,
-          nextVersion,
-          nextTurnDeadline,
-        );
+        const snapshot = this.compactSnapshot(room, mutation.state, nextVersion, nextTurnDeadline);
         const event = this.hub.event(
           mutation.eventType,
           {
@@ -1372,7 +1447,8 @@ export class LudoService {
 
     for (const userId of result.userIds) {
       this.hub.send(userId, result.event);
-      if (result.completed || result.clearedUserIds.includes(userId)) this.hub.setGame(userId, null);
+      if (result.completed || result.clearedUserIds.includes(userId))
+        this.hub.setGame(userId, null);
     }
     if (result.completed) {
       const winnerId = (result.event.payload as { finishOrder?: string[] }).finishOrder?.[0];
@@ -1408,11 +1484,14 @@ export class LudoService {
         try {
           next = forfeitPlayer(state, userId, now.toISOString());
         } catch (error) {
-          throw new BadRequestError(error instanceof Error ? error.message : "Player cannot forfeit");
+          throw new BadRequestError(
+            error instanceof Error ? error.message : "Player cannot forfeit",
+          );
         }
         return {
           state: next,
-          eventType: next.status === "COMPLETED" ? ("game.finished" as const) : ("game.forfeited" as const),
+          eventType:
+            next.status === "COMPLETED" ? ("game.finished" as const) : ("game.forfeited" as const),
           payload: { userId, reason, finishOrder: next.finishOrder },
           diceRollIncrement: 0,
           capturesIncrement: 0,
@@ -1629,19 +1708,17 @@ export class LudoService {
         data: { roomId: gameId, userId, clientActionId: actionId, type: "QUICK", content: code },
       });
     } catch (error) {
-      if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== "P2002") throw error;
+      if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== "P2002")
+        throw error;
       created = false;
       row = await this.prisma.ludoChatMessage.findUniqueOrThrow({
-        where: { roomId_userId_clientActionId: { roomId: gameId, userId, clientActionId: actionId } },
+        where: {
+          roomId_userId_clientActionId: { roomId: gameId, userId, clientActionId: actionId },
+        },
       });
     }
     const room = await this.prisma.ludoRoom.findUniqueOrThrow({ where: { id: gameId } });
-    const event = this.chatEvent(
-      row,
-      "chat.quick.received",
-      gameId,
-      room.stateVersion,
-    );
+    const event = this.chatEvent(row, "chat.quick.received", gameId, room.stateVersion);
     if (created) {
       this.hub.broadcastRoom(gameId, event, {
         excludeUserIds: await this.chatExclusions(gameId, userId),
@@ -1663,7 +1740,8 @@ export class LudoService {
       this.effectiveEntitlement(userId),
     ]);
     if (!config.textChatEnabled) throw new ForbiddenError("Text chat is disabled");
-    if (!entitlement.entitlements.textChat) throw new ForbiddenError("Ludo Plus or Pro is required");
+    if (!entitlement.entitlements.textChat)
+      throw new ForbiddenError("Ludo Plus or Pro is required");
     await this.assertRoomMember(userId, gameId);
     await this.assertNotRestricted(userId, "COMMUNICATION");
     await this.assertNotRestricted(userId, "TEXT_CHAT");
@@ -1690,19 +1768,17 @@ export class LudoService {
         data: { roomId: gameId, userId, clientActionId: actionId, type: "TEXT", content: message },
       });
     } catch (error) {
-      if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== "P2002") throw error;
+      if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== "P2002")
+        throw error;
       created = false;
       row = await this.prisma.ludoChatMessage.findUniqueOrThrow({
-        where: { roomId_userId_clientActionId: { roomId: gameId, userId, clientActionId: actionId } },
+        where: {
+          roomId_userId_clientActionId: { roomId: gameId, userId, clientActionId: actionId },
+        },
       });
     }
     const room = await this.prisma.ludoRoom.findUniqueOrThrow({ where: { id: gameId } });
-    const event = this.chatEvent(
-      row,
-      "chat.text.received",
-      gameId,
-      room.stateVersion,
-    );
+    const event = this.chatEvent(row, "chat.text.received", gameId, room.stateVersion);
     if (created) {
       this.hub.broadcastRoom(gameId, event, {
         excludeUserIds: await this.chatExclusions(gameId, userId),
@@ -1898,7 +1974,12 @@ export class LudoService {
     const report = await this.prisma.ludoReport.create({
       data: { roomId: gameId, reporterId, ...input },
     });
-    return this.hub.event("game.state", { reportSubmitted: true, reportId: report.id }, gameId, null);
+    return this.hub.event(
+      "game.state",
+      { reportSubmitted: true, reportId: report.id },
+      gameId,
+      null,
+    );
   }
 
   async setBlock(userId: string, targetUserId: string, blocked: boolean): Promise<void> {
@@ -1910,11 +1991,18 @@ export class LudoService {
         update: {},
       });
     } else {
-      await this.prisma.ludoUserBlock.deleteMany({ where: { userId, blockedUserId: targetUserId } });
+      await this.prisma.ludoUserBlock.deleteMany({
+        where: { userId, blockedUserId: targetUserId },
+      });
     }
   }
 
-  async setMute(userId: string, gameId: string, targetUserId: string, muted: boolean): Promise<void> {
+  async setMute(
+    userId: string,
+    gameId: string,
+    targetUserId: string,
+    muted: boolean,
+  ): Promise<void> {
     await this.assertRoomMember(userId, gameId);
     if (userId === targetUserId) throw new BadRequestError("You cannot mute yourself");
     if (muted) {
@@ -1924,7 +2012,9 @@ export class LudoService {
         update: {},
       });
     } else {
-      await this.prisma.ludoUserMute.deleteMany({ where: { roomId: gameId, userId, mutedUserId: targetUserId } });
+      await this.prisma.ludoUserMute.deleteMany({
+        where: { roomId: gameId, userId, mutedUserId: targetUserId },
+      });
     }
   }
 
@@ -1932,12 +2022,20 @@ export class LudoService {
     const config = await this.runtimeConfig();
     const result = await this.prisma.$transaction(async (tx) => {
       await this.lock(tx, `ludo:room:${roomId}`, 20260804);
-      const room = await tx.ludoRoom.findUnique({ where: { id: roomId }, include: { players: true } });
+      const room = await tx.ludoRoom.findUnique({
+        where: { id: roomId },
+        include: { players: true },
+      });
       if (!room || (room.status !== "MATCHED" && room.status !== "WAITING_READY")) return null;
       const now = await this.dbNow(tx);
       await tx.ludoRoom.update({
         where: { id: roomId },
-        data: { status: "CANCELLED", completedAt: now, cancelledReason: reason, acceptanceDeadline: null },
+        data: {
+          status: "CANCELLED",
+          completedAt: now,
+          cancelledReason: reason,
+          acceptanceDeadline: null,
+        },
       });
       await tx.ludoPlayer.updateMany({
         where: { roomId },

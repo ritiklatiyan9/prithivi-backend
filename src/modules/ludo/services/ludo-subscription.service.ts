@@ -19,6 +19,13 @@ import type {
 } from "../schemas/ludo.schema.js";
 import type { LudoRealtimeHub } from "../sockets/ludo-hub.js";
 import type { LudoService } from "./ludo.service.js";
+import {
+  LUDO_SUBSCRIPTION_CATALOG,
+  catalogPlan,
+  ludoPurchaseAvailability,
+  razorpayCredentials,
+  type LudoPurchaseAvailability,
+} from "./ludo-subscription-catalog.js";
 
 interface RazorpaySubscription {
   id: string;
@@ -28,6 +35,17 @@ interface RazorpaySubscription {
   current_start?: number | null;
   current_end?: number | null;
   ended_at?: number | null;
+}
+
+interface RazorpayPlan {
+  id: string;
+  period: string;
+  interval: number;
+  item?: {
+    amount?: number;
+    currency?: string;
+    active?: boolean;
+  };
 }
 
 interface RazorpayWebhook {
@@ -47,9 +65,7 @@ interface RazorpayWebhook {
 }
 
 const fromUnix = (value: number | null | undefined): Date | null =>
-  typeof value === "number" && Number.isFinite(value) && value > 0
-    ? new Date(value * 1000)
-    : null;
+  typeof value === "number" && Number.isFinite(value) && value > 0 ? new Date(value * 1000) : null;
 
 const mapProviderStatus = (status: string): LudoSubscriptionStatus => {
   switch (status.toLowerCase()) {
@@ -84,44 +100,49 @@ export class LudoSubscriptionService {
   ) {}
 
   async plans(): Promise<Record<string, unknown>[]> {
-    const [enabled, plusName, proName] = await Promise.all([
+    const [settingEnabled, plusName, proName, plusPlanId, proPlanId] = await Promise.all([
       this.settings.getBoolean("game.ludo.subscriptionPurchaseEnabled"),
       this.settings.getString("game.ludo.plusPlanName"),
       this.settings.getString("game.ludo.proPlanName"),
+      this.settings.getString("game.ludo.plusPlanId"),
+      this.settings.getString("game.ludo.proPlanId"),
     ]);
-    const configured = this.credentials() !== null;
-    return [
-      {
-        plan: "FREE",
-        code: "FREE",
-        name: "Free",
+    const availability = ludoPurchaseAvailability(this.env, settingEnabled, { plusPlanId, proPlanId });
+    const names = {
+      FREE: "Free",
+      PLUS: plusName.trim() || "Ludo Plus",
+      PRO: proName.trim() || "Ludo Pro",
+    } as const;
+
+    // `enabled` means that the catalog item is published, not that payment
+    // infrastructure happens to be ready. Older app builds filter the catalog
+    // on this field, so coupling it to credentials made both paid plans vanish.
+    return LUDO_SUBSCRIPTION_CATALOG.map((plan) => {
+      const payment = plan.plan === "FREE" ? null : availability.plans[plan.plan];
+      return {
+        plan: plan.plan,
+        code: plan.code,
+        name: names[plan.plan],
         enabled: true,
-        pricePaise: 0,
-        period: "MONTHLY",
-        features: ["Quick chat", "Free reactions"],
-        entitlements: { quickChat: true, textChat: false, voiceChat: false },
-      },
-      {
-        plan: "PLUS",
-        code: "PLUS",
-        name: plusName || "Ludo Plus",
-        enabled: enabled && configured && Boolean(this.env.RAZORPAY_LUDO_PLUS_PLAN_ID),
-        pricePaise: 34_900,
-        period: "MONTHLY",
-        features: ["Quick chat", "Text chat"],
-        entitlements: { quickChat: true, textChat: true, voiceChat: false },
-      },
-      {
-        plan: "PRO",
-        code: "PRO",
-        name: proName || "Ludo Pro",
-        enabled: enabled && configured && Boolean(this.env.RAZORPAY_LUDO_PRO_PLAN_ID),
-        pricePaise: 49_900,
-        period: "MONTHLY",
-        features: ["Quick chat", "Text chat", "Voice chat"],
-        entitlements: { quickChat: true, textChat: true, voiceChat: true },
-      },
-    ];
+        purchasable: payment?.purchasable ?? false,
+        checkoutConfigured: payment?.checkoutConfigured ?? false,
+        availabilityReason: payment?.availabilityReason ?? null,
+        pricePaise: plan.pricePaise,
+        currency: "INR",
+        period: plan.period,
+        features: [...plan.features],
+        entitlements: plan.entitlements,
+      };
+    });
+  }
+
+  async purchaseAvailability(): Promise<LudoPurchaseAvailability> {
+    const [settingEnabled, plusPlanId, proPlanId] = await Promise.all([
+      this.settings.getBoolean("game.ludo.subscriptionPurchaseEnabled"),
+      this.settings.getString("game.ludo.plusPlanId"),
+      this.settings.getString("game.ludo.proPlanId"),
+    ]);
+    return ludoPurchaseAvailability(this.env, settingEnabled, { plusPlanId, proPlanId });
   }
 
   async current(userId: string): Promise<Record<string, unknown>> {
@@ -132,13 +153,18 @@ export class LudoSubscriptionService {
         orderBy: { createdAt: "desc" },
       }),
     ]);
-    const cancelAtPeriodEnd = subscription?.cancelledAt !== null && subscription?.cancelledAt !== undefined;
+    const cancelAtPeriodEnd =
+      subscription?.cancelledAt !== null && subscription?.cancelledAt !== undefined;
     const enrichedEntitlement = {
       ...entitlement,
       renewsAt: entitlement.plan !== "FREE" && !cancelAtPeriodEnd ? entitlement.expiresAt : null,
       cancelAtPeriodEnd,
     };
-    return { ...enrichedEntitlement, entitlement: enrichedEntitlement, subscription: subscription ? this.dto(subscription) : null };
+    return {
+      ...enrichedEntitlement,
+      entitlement: enrichedEntitlement,
+      subscription: subscription ? this.dto(subscription) : null,
+    };
   }
 
   async history(userId: string): Promise<Record<string, unknown>[]> {
@@ -168,16 +194,21 @@ export class LudoSubscriptionService {
     userId: string,
     input: CreateSubscriptionOrderInput,
   ): Promise<Record<string, unknown>> {
-    const enabled = await this.settings.getBoolean("game.ludo.subscriptionPurchaseEnabled");
-    if (!enabled) throw new ForbiddenError("Ludo subscriptions are not available");
-    const planId =
-      input.plan === "PLUS"
-        ? this.env.RAZORPAY_LUDO_PLUS_PLAN_ID
-        : this.env.RAZORPAY_LUDO_PRO_PLAN_ID;
+    const availability = await this.purchaseAvailability();
+    if (!availability.settingEnabled) {
+      throw new ForbiddenError("Ludo subscriptions are not available");
+    }
+    const planAvailability = availability.plans[input.plan];
     const credentials = this.credentials();
-    if (!credentials || !planId) {
+    const planId = planAvailability.providerPlanId;
+    if (!planAvailability.purchasable || !credentials || !planId) {
       throw new AppError("This subscription plan is not configured", 503, "PAYMENT_NOT_CONFIGURED");
     }
+    const plan = catalogPlan(input.plan);
+    const providerPlan = await this.razorpay<RazorpayPlan>(`/plans/${encodeURIComponent(planId)}`, {
+      method: "GET",
+    });
+    this.assertProviderPlan(providerPlan, planId, plan.pricePaise);
     const existing = await this.prisma.ludoSubscription.findFirst({
       where: {
         userId,
@@ -191,7 +222,14 @@ export class LudoSubscriptionService {
           "Cancel the current Ludo subscription before selecting a different plan",
         );
       }
-      return { ...this.dto(existing), keyId: credentials.keyId };
+      return {
+        ...this.dto(existing),
+        keyId: credentials.keyId,
+        amountPaise: plan.pricePaise,
+        currency: "INR",
+        name: "Money Marathon",
+        description: `${plan.defaultName} membership`,
+      };
     }
 
     const provider = await this.razorpay<RazorpaySubscription>("/subscriptions", {
@@ -205,7 +243,11 @@ export class LudoSubscriptionService {
       },
     });
     if (!provider.id.startsWith("sub_") || provider.plan_id !== planId) {
-      throw new AppError("Razorpay returned an invalid subscription", 502, "PAYMENT_PROVIDER_ERROR");
+      throw new AppError(
+        "Razorpay returned an invalid subscription",
+        502,
+        "PAYMENT_PROVIDER_ERROR",
+      );
     }
     const row = await this.prisma.ludoSubscription.create({
       data: {
@@ -219,7 +261,14 @@ export class LudoSubscriptionService {
         currentPeriodEnd: fromUnix(provider.current_end),
       },
     });
-    return { ...this.dto(row), keyId: credentials.keyId };
+    return {
+      ...this.dto(row),
+      keyId: credentials.keyId,
+      amountPaise: plan.pricePaise,
+      currency: "INR",
+      name: "Money Marathon",
+      description: `${plan.defaultName} membership`,
+    };
   }
 
   async verify(userId: string, input: VerifySubscriptionInput): Promise<Record<string, unknown>> {
@@ -275,12 +324,19 @@ export class LudoSubscriptionService {
     await this.applyLifecycle(row.id, provider, row.latestPaymentId);
     await this.prisma.ludoSubscription.update({
       where: { id: row.id },
-      data: { cancelledAt: new Date(), currentPeriodEnd: fromUnix(provider.current_end) ?? row.currentPeriodEnd },
+      data: {
+        cancelledAt: new Date(),
+        currentPeriodEnd: fromUnix(provider.current_end) ?? row.currentPeriodEnd,
+      },
     });
     return this.current(userId);
   }
 
-  async webhook(rawBody: Buffer, signature: string | undefined, eventId: string | undefined): Promise<Record<string, unknown>> {
+  async webhook(
+    rawBody: Buffer,
+    signature: string | undefined,
+    eventId: string | undefined,
+  ): Promise<Record<string, unknown>> {
     this.verifyWebhookSignature(rawBody, signature);
     let body: RazorpayWebhook;
     try {
@@ -351,13 +407,14 @@ export class LudoSubscriptionService {
       if (!provider || provider.plan_id !== subscription.razorpayPlanId) {
         throw new BadRequestError("Webhook subscription plan mismatch");
       }
-      await this.applyLifecycle(subscription.id, provider, body.payload?.payment?.entity?.id ?? null);
+      await this.applyLifecycle(
+        subscription.id,
+        provider,
+        body.payload?.payment?.entity?.id ?? null,
+      );
       await this.finishPaymentEvent(paymentEvent.id, "PROCESSED", subscription.id, null);
       const entitlement = await this.ludo.effectiveEntitlement(subscription.userId);
-      this.hub.send(
-        subscription.userId,
-        this.hub.event("entitlement.updated", { entitlement }),
-      );
+      this.hub.send(subscription.userId, this.hub.event("entitlement.updated", { entitlement }));
       return { accepted: true, duplicate: false };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -455,24 +512,48 @@ export class LudoSubscriptionService {
   }
 
   private credentials(): { keyId: string; keySecret: string } | null {
-    return this.env.RAZORPAY_KEY_ID && this.env.RAZORPAY_KEY_SECRET
-      ? { keyId: this.env.RAZORPAY_KEY_ID, keySecret: this.env.RAZORPAY_KEY_SECRET }
-      : null;
+    return razorpayCredentials(this.env);
   }
 
-  private verifyCheckoutSignature(paymentId: string, subscriptionId: string, signature: string): void {
+  private assertProviderPlan(plan: RazorpayPlan, planId: string, pricePaise: number): void {
+    const matchesPublishedCatalog =
+      plan.id === planId &&
+      typeof plan.period === "string" &&
+      plan.period.toLowerCase() === "monthly" &&
+      plan.interval === 1 &&
+      plan.item?.amount === pricePaise &&
+      plan.item.currency?.toUpperCase() === "INR" &&
+      plan.item.active !== false;
+    if (!matchesPublishedCatalog) {
+      throw new AppError(
+        "Razorpay plan does not match the published Ludo membership price",
+        503,
+        "PAYMENT_PLAN_MISMATCH",
+      );
+    }
+  }
+
+  private verifyCheckoutSignature(
+    paymentId: string,
+    subscriptionId: string,
+    signature: string,
+  ): void {
     const credentials = this.credentials();
-    if (!credentials) throw new AppError("Razorpay is not configured", 503, "PAYMENT_NOT_CONFIGURED");
+    if (!credentials)
+      throw new AppError("Razorpay is not configured", 503, "PAYMENT_NOT_CONFIGURED");
     const expected = createHmac("sha256", credentials.keySecret)
       .update(`${paymentId}|${subscriptionId}`)
       .digest("hex");
-    if (!this.safeEqual(expected, signature)) throw new BadRequestError("Invalid payment signature");
+    if (!this.safeEqual(expected, signature))
+      throw new BadRequestError("Invalid payment signature");
   }
 
   private verifyWebhookSignature(rawBody: Buffer, signature: string | undefined): void {
     if (!signature) throw new BadRequestError("Missing Razorpay webhook signature");
-    const secrets = [this.env.RAZORPAY_WEBHOOK_SECRET, this.env.RAZORPAY_WEBHOOK_SECRET_PREVIOUS]
-      .filter((value): value is string => Boolean(value));
+    const secrets = [
+      this.env.RAZORPAY_WEBHOOK_SECRET,
+      this.env.RAZORPAY_WEBHOOK_SECRET_PREVIOUS,
+    ].filter((value): value is string => Boolean(value));
     if (secrets.length === 0) {
       throw new AppError("Razorpay webhook is not configured", 503, "PAYMENT_NOT_CONFIGURED");
     }
@@ -494,7 +575,8 @@ export class LudoSubscriptionService {
     init: { method: "GET" | "POST"; body?: Record<string, unknown> },
   ): Promise<T> {
     const credentials = this.credentials();
-    if (!credentials) throw new AppError("Razorpay is not configured", 503, "PAYMENT_NOT_CONFIGURED");
+    if (!credentials)
+      throw new AppError("Razorpay is not configured", 503, "PAYMENT_NOT_CONFIGURED");
     const response = await fetch(`${this.env.RAZORPAY_API_BASE_URL}${path}`, {
       method: init.method,
       headers: {

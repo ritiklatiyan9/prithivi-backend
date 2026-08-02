@@ -862,7 +862,7 @@ export const SETTINGS_REGISTRY: readonly SettingDefinition[] = [
     type: "STRING",
     category: "Ludo",
     label: "Plus plan name",
-    description: "Display name for the ₹349 text-chat membership.",
+    description: "Display name for the ₹99/month text-chat membership.",
     default: "Ludo Plus",
   },
   {
@@ -870,8 +870,26 @@ export const SETTINGS_REGISTRY: readonly SettingDefinition[] = [
     type: "STRING",
     category: "Ludo",
     label: "Pro plan name",
-    description: "Display name for the ₹499 text-and-voice membership.",
+    description: "Display name for the ₹149/month text-and-voice membership.",
     default: "Ludo Pro",
+  },
+  {
+    key: "game.ludo.plusPlanId",
+    type: "STRING",
+    category: "Ludo",
+    label: "PLUS Razorpay plan ID",
+    description:
+      "Razorpay monthly ₹99 plan ID (plan_...). If empty, the environment fallback is used.",
+    default: "",
+  },
+  {
+    key: "game.ludo.proPlanId",
+    type: "STRING",
+    category: "Ludo",
+    label: "PRO Razorpay plan ID",
+    description:
+      "Razorpay monthly ₹149 plan ID (plan_...). If empty, the environment fallback is used.",
+    default: "",
   },
   // --- Web (in-app web zone) ---
   {
