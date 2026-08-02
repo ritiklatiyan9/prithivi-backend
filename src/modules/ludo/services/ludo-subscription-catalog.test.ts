@@ -6,21 +6,11 @@ import {
   ludoPurchaseAvailability,
 } from "./ludo-subscription-catalog.js";
 
-type PaymentEnv = Pick<
-  Env,
-  | "RAZORPAY_KEY_ID"
-  | "RAZORPAY_KEY_SECRET"
-  | "RAZORPAY_WEBHOOK_SECRET"
-  | "RAZORPAY_LUDO_PLUS_PLAN_ID"
-  | "RAZORPAY_LUDO_PRO_PLAN_ID"
->;
+type PaymentEnv = Pick<Env, "RAZORPAY_KEY_ID" | "RAZORPAY_KEY_SECRET">;
 
 const configuredEnv = (overrides: Partial<PaymentEnv> = {}): PaymentEnv => ({
   RAZORPAY_KEY_ID: "rzp_test_example",
   RAZORPAY_KEY_SECRET: "test-secret",
-  RAZORPAY_WEBHOOK_SECRET: "webhook-secret",
-  RAZORPAY_LUDO_PLUS_PLAN_ID: "plan_plus",
-  RAZORPAY_LUDO_PRO_PLAN_ID: "plan_pro",
   ...overrides,
 });
 
@@ -43,54 +33,35 @@ describe("Ludo subscription catalog", () => {
     ]);
   });
 
-  it("separates catalog visibility from checkout availability", () => {
-    const availability = ludoPurchaseAvailability(configuredEnv(), false);
+  it("keeps the catalog visible but disables checkout without the shared key pair", () => {
+    const availability = ludoPurchaseAvailability(
+      configuredEnv({ RAZORPAY_KEY_ID: undefined, RAZORPAY_KEY_SECRET: undefined }),
+    );
 
     expect(availability).toMatchObject({
-      settingEnabled: false,
-      checkoutConfigured: true,
+      checkoutConfigured: false,
       purchaseEnabled: false,
       plans: {
         PLUS: {
-          checkoutConfigured: true,
+          checkoutConfigured: false,
           purchasable: false,
-          availabilityReason: "PURCHASES_DISABLED",
+          availabilityReason: "PAYMENT_NOT_CONFIGURED",
         },
         PRO: {
-          checkoutConfigured: true,
+          checkoutConfigured: false,
           purchasable: false,
-          availabilityReason: "PURCHASES_DISABLED",
+          availabilityReason: "PAYMENT_NOT_CONFIGURED",
         },
       },
     });
   });
 
-  it("allows test checkout to provision missing plans without a webhook secret", () => {
-    const noWebhook = ludoPurchaseAvailability(
-      configuredEnv({ RAZORPAY_WEBHOOK_SECRET: undefined }),
-      true,
-      undefined,
-    );
-    expect(noWebhook.purchaseEnabled).toBe(true);
-    expect(noWebhook.plans.PLUS.availabilityReason).toBeNull();
-
-    const noProPlan = ludoPurchaseAvailability(
-      configuredEnv({ RAZORPAY_LUDO_PRO_PLAN_ID: undefined }),
-      true,
-      undefined,
-    );
-    expect(noProPlan.purchaseEnabled).toBe(true);
-    expect(noProPlan.plans.PLUS.purchasable).toBe(true);
-    expect(noProPlan.plans.PRO).toMatchObject({
-      purchasable: true,
-      availabilityReason: null,
-      providerPlanId: null,
-    });
-
-    const ready = ludoPurchaseAvailability(configuredEnv(), true);
+  it("enables both plans from the same credentials used by Add Coins", () => {
+    const ready = ludoPurchaseAvailability(configuredEnv());
     expect(ready.purchaseEnabled).toBe(true);
     expect(ready.plans.PLUS.purchasable).toBe(true);
     expect(ready.plans.PRO.purchasable).toBe(true);
+    expect(ready.plans.PLUS.availabilityReason).toBeNull();
   });
 
   it("rejects blank and deployment-template placeholders", () => {

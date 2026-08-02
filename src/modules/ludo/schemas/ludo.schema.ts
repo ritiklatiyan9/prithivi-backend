@@ -267,7 +267,7 @@ export type CreateSubscriptionOrderInput = z.infer<typeof createSubscriptionOrde
 export const verifySubscriptionSchema = z.object({
   subscriptionId: z
     .string()
-    .regex(/^sub_[A-Za-z0-9]+$/)
+    .regex(/^(?:sub|order)_[A-Za-z0-9]+$/)
     .max(100),
   paymentId: z
     .string()

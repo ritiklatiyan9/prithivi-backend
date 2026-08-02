@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../../../config/env.js";
@@ -10,26 +11,20 @@ const baseEnv = {
   RAZORPAY_API_BASE_URL: "https://api.razorpay.com/v1",
 } as Env;
 
-const settings = (purchaseEnabled: boolean): SettingsService =>
+const settings = (values: Record<string, string> = {}): SettingsService =>
   ({
-    getBoolean: vi.fn(async () => purchaseEnabled),
-    getString: vi.fn(async (key: string) => {
-      if (key === "game.ludo.plusPlanName") return "Ludo Plus";
-      if (key === "game.ludo.proPlanName") return "Ludo Pro";
-      if (key === "game.ludo.plusPlanId") return "plan_plus";
-      if (key === "game.ludo.proPlanId") return "plan_pro";
-      return "";
-    }),
+    getBoolean: vi.fn(async () => false),
+    getString: vi.fn(async (key: string) => values[key] ?? ""),
   }) as unknown as SettingsService;
 
 const service = (
   env: Env,
-  purchaseEnabled: boolean,
   prisma: Partial<PrismaClient> = {},
+  settingValues: Record<string, string> = {},
 ): LudoSubscriptionService =>
   new LudoSubscriptionService(
     prisma as PrismaClient,
-    settings(purchaseEnabled),
+    settings(settingValues),
     {} as LudoService,
     {} as LudoRealtimeHub,
     env,
@@ -41,7 +36,7 @@ afterEach(() => {
 
 describe("LudoSubscriptionService catalog and checkout gate", () => {
   it("always returns the paid catalog even when checkout is disabled and unconfigured", async () => {
-    const plans = await service(baseEnv, false).plans();
+    const plans = await service(baseEnv).plans();
 
     expect(plans).toHaveLength(3);
     expect(plans).toEqual(
@@ -50,32 +45,25 @@ describe("LudoSubscriptionService catalog and checkout gate", () => {
           plan: "PLUS",
           enabled: true,
           purchasable: false,
-          availabilityReason: "PURCHASES_DISABLED",
+          availabilityReason: "PAYMENT_NOT_CONFIGURED",
           pricePaise: 9_900,
         }),
         expect.objectContaining({
           plan: "PRO",
           enabled: true,
           purchasable: false,
-          availabilityReason: "PURCHASES_DISABLED",
+          availabilityReason: "PAYMENT_NOT_CONFIGURED",
           pricePaise: 14_900,
         }),
       ]),
     );
   });
 
-  it("fails before touching the database when secure webhook activation is unconfigured", async () => {
+  it("fails before touching the database when the shared Razorpay keys are unconfigured", async () => {
     const findFirst = vi.fn();
-    const subject = service(
-      {
-        ...baseEnv,
-        RAZORPAY_KEY_ID: "rzp_test_example",
-        RAZORPAY_KEY_SECRET: "test-secret",
-        RAZORPAY_LUDO_PLUS_PLAN_ID: "plan_plus",
-      },
-      true,
-      { ludoSubscription: { findFirst } } as unknown as PrismaClient,
-    );
+    const subject = service(baseEnv, {
+      ludoSubscription: { findFirst },
+    } as unknown as PrismaClient);
 
     await expect(subject.createOrder("user-1", { plan: "PLUS" })).rejects.toMatchObject({
       code: "PAYMENT_NOT_CONFIGURED",
@@ -84,68 +72,52 @@ describe("LudoSubscriptionService catalog and checkout gate", () => {
     expect(findFirst).not.toHaveBeenCalled();
   });
 
-  it("refuses a provider plan whose real charge differs from the published price", async () => {
-    const findFirst = vi.fn();
+  it("refuses a Razorpay order whose charge differs from the published price", async () => {
+    const findFirst = vi.fn(async () => null);
+    const create = vi.fn();
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => ({
         ok: true,
         json: async () => ({
-          id: "plan_plus",
-          period: "monthly",
-          interval: 1,
-          item: { amount: 1, currency: "INR", active: true },
+          id: "order_wrong",
+          amount: 1,
+          currency: "INR",
+          status: "created",
         }),
       })),
     );
     const subject = service(
+      baseEnv,
+      { ludoSubscription: { findFirst, create } } as unknown as PrismaClient,
       {
-        ...baseEnv,
-        RAZORPAY_KEY_ID: "rzp_test_example",
-        RAZORPAY_KEY_SECRET: "test-secret",
-        RAZORPAY_WEBHOOK_SECRET: "webhook-secret",
-        RAZORPAY_LUDO_PLUS_PLAN_ID: "plan_plus",
-        RAZORPAY_LUDO_PRO_PLAN_ID: "plan_pro",
+        "payment.razorpay.keyId": "rzp_test_example",
+        "payment.razorpay.keySecret": "test-secret",
       },
-      true,
-      { ludoSubscription: { findFirst } } as unknown as PrismaClient,
     );
 
     await expect(subject.createOrder("user-1", { plan: "PLUS" })).rejects.toMatchObject({
-      code: "PAYMENT_PLAN_MISMATCH",
-      statusCode: 503,
+      code: "PAYMENT_PROVIDER_ERROR",
+      statusCode: 502,
     });
-    expect(findFirst).not.toHaveBeenCalled();
+    expect(findFirst).toHaveBeenCalledTimes(2);
+    expect(create).not.toHaveBeenCalled();
   });
 
-  it("returns server-owned checkout pricing after validating the provider plan", async () => {
+  it("creates a Standard Checkout order using the saved Add Coins credentials", async () => {
     const now = new Date("2026-08-02T00:00:00.000Z");
-    const providerFetch = vi
-      .fn()
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          id: "plan_plus",
-          period: "monthly",
-          interval: 1,
-          item: { amount: 9_900, currency: "INR", active: true },
-        }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ id: "sub_123", plan_id: "plan_plus", status: "created" }),
-      });
+    const providerFetch = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        id: "order_123",
+        amount: 9_900,
+        currency: "INR",
+        status: "created",
+      }),
+    }));
     vi.stubGlobal("fetch", providerFetch);
     const subject = service(
-      {
-        ...baseEnv,
-        RAZORPAY_KEY_ID: "rzp_test_example",
-        RAZORPAY_KEY_SECRET: "test-secret",
-        RAZORPAY_WEBHOOK_SECRET: "webhook-secret",
-        RAZORPAY_LUDO_PLUS_PLAN_ID: "plan_plus",
-        RAZORPAY_LUDO_PRO_PLAN_ID: "plan_pro",
-      },
-      true,
+      baseEnv,
       {
         ludoSubscription: {
           findFirst: vi.fn(async () => null),
@@ -153,7 +125,7 @@ describe("LudoSubscriptionService catalog and checkout gate", () => {
             id: "record-1",
             plan: "PLUS",
             status: "PENDING",
-            razorpaySubscriptionId: "sub_123",
+            razorpaySubscriptionId: "order_123",
             currentPeriodStart: null,
             currentPeriodEnd: null,
             cancelledAt: null,
@@ -162,15 +134,111 @@ describe("LudoSubscriptionService catalog and checkout gate", () => {
           })),
         },
       } as unknown as PrismaClient,
+      {
+        "payment.razorpay.keyId": "rzp_live_shared",
+        "payment.razorpay.keySecret": "live-shared-secret",
+      },
     );
 
     await expect(subject.createOrder("user-1", { plan: "PLUS" })).resolves.toMatchObject({
-      keyId: "rzp_test_example",
-      subscriptionId: "sub_123",
+      keyId: "rzp_live_shared",
+      subscriptionId: null,
+      orderId: "order_123",
       amountPaise: 9_900,
       currency: "INR",
       description: "Ludo Plus membership",
     });
-    expect(providerFetch).toHaveBeenCalledTimes(2);
+    expect(providerFetch).toHaveBeenCalledTimes(1);
+    expect(providerFetch).toHaveBeenCalledWith(
+      "https://api.razorpay.com/v1/orders",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("verifies and captures an order before activating one month of membership", async () => {
+    const now = new Date("2026-08-02T00:00:00.000Z");
+    const pending = {
+      id: "record-1",
+      userId: "user-1",
+      plan: "PLUS" as const,
+      status: "PENDING" as const,
+      razorpaySubscriptionId: "order_123",
+      razorpayPlanId: "standard_order_PLUS",
+      razorpayCustomerId: null,
+      latestPaymentId: null,
+      currentPeriodStart: null,
+      currentPeriodEnd: null,
+      cancelledAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const active = {
+      ...pending,
+      status: "ACTIVE" as const,
+      latestPaymentId: "pay_123",
+      currentPeriodStart: now,
+      currentPeriodEnd: new Date("2026-09-02T00:00:00.000Z"),
+    };
+    const entitlementUpsert = vi.fn();
+    const paymentEventUpsert = vi.fn();
+    const transaction = vi.fn(async (callback: (tx: unknown) => unknown) =>
+      callback({
+        ludoSubscription: {
+          updateMany: vi.fn(async () => ({ count: 1 })),
+          findUniqueOrThrow: vi.fn(async () => active),
+        },
+        ludoEntitlement: { upsert: entitlementUpsert },
+        ludoPaymentEvent: { upsert: paymentEventUpsert },
+      }),
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          id: "pay_123",
+          order_id: "order_123",
+          amount: 9_900,
+          currency: "INR",
+          status: "captured",
+          captured: true,
+        }),
+      })),
+    );
+    const keySecret = "shared-secret";
+    const signature = createHmac("sha256", keySecret).update("order_123|pay_123").digest("hex");
+    const effectiveEntitlement = vi.fn(async () => ({ plan: "PLUS", status: "ACTIVE" }));
+    const send = vi.fn();
+    const subject = new LudoSubscriptionService(
+      {
+        ludoSubscription: { findUnique: vi.fn(async () => pending) },
+        $transaction: transaction,
+      } as unknown as PrismaClient,
+      settings({
+        "payment.razorpay.keyId": "rzp_live_shared",
+        "payment.razorpay.keySecret": keySecret,
+      }),
+      { effectiveEntitlement } as unknown as LudoService,
+      { event: vi.fn((_type, payload) => payload), send } as unknown as LudoRealtimeHub,
+      baseEnv,
+    );
+
+    await expect(
+      subject.verify("user-1", {
+        subscriptionId: "order_123",
+        paymentId: "pay_123",
+        signature,
+      }),
+    ).resolves.toMatchObject({ status: "ACTIVE" });
+    expect(entitlementUpsert).toHaveBeenCalledOnce();
+    expect(paymentEventUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          razorpayPaymentId: "pay_123",
+          subscriptionRecordId: "record-1",
+        }),
+      }),
+    );
+    expect(send).toHaveBeenCalledOnce();
   });
 });

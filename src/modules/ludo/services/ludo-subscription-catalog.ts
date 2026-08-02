@@ -1,8 +1,7 @@
 import type { Env } from "../../../config/env.js";
 
 export type LudoPaidPlanCode = "PLUS" | "PRO";
-export type LudoPlanAvailabilityReason =
-  "PURCHASES_DISABLED" | "PAYMENT_NOT_CONFIGURED" | "PLAN_NOT_CONFIGURED";
+export type LudoPlanAvailabilityReason = "PAYMENT_NOT_CONFIGURED";
 
 export interface LudoCatalogPlan {
   plan: "FREE" | LudoPaidPlanCode;
@@ -63,7 +62,6 @@ export const configuredValue = (value: string | undefined): string | null => {
 export interface RazorpayCredentialOverrides {
   keyId?: string;
   keySecret?: string;
-  webhookSecret?: string;
 }
 
 export const razorpayCredentials = (
@@ -71,12 +69,12 @@ export const razorpayCredentials = (
   overrides: RazorpayCredentialOverrides = {},
 ): { keyId: string; keySecret: string } | null => {
   const keyId = configuredValue(overrides.keyId) ?? configuredValue(env.RAZORPAY_KEY_ID);
-  const keySecret = configuredValue(overrides.keySecret) ?? configuredValue(env.RAZORPAY_KEY_SECRET);
+  const keySecret =
+    configuredValue(overrides.keySecret) ?? configuredValue(env.RAZORPAY_KEY_SECRET);
   return keyId && keySecret ? { keyId, keySecret } : null;
 };
 
 export interface LudoPurchaseAvailability {
-  settingEnabled: boolean;
   checkoutConfigured: boolean;
   purchaseEnabled: boolean;
   plans: Record<
@@ -85,73 +83,35 @@ export interface LudoPurchaseAvailability {
       checkoutConfigured: boolean;
       purchasable: boolean;
       availabilityReason: LudoPlanAvailabilityReason | null;
-      providerPlanId: string | null;
     }
   >;
 }
 
 export const ludoPurchaseAvailability = (
-  env: Pick<
-    Env,
-    | "RAZORPAY_KEY_ID"
-    | "RAZORPAY_KEY_SECRET"
-    | "RAZORPAY_WEBHOOK_SECRET"
-    | "RAZORPAY_LUDO_PLUS_PLAN_ID"
-    | "RAZORPAY_LUDO_PRO_PLAN_ID"
-  >,
-  settingEnabled: boolean,
-  planIds?: {
-    plusPlanId?: string;
-    proPlanId?: string;
-  },
+  env: Pick<Env, "RAZORPAY_KEY_ID" | "RAZORPAY_KEY_SECRET">,
   credentials?: RazorpayCredentialOverrides,
 ): LudoPurchaseAvailability => {
-  const providerCredentials = razorpayCredentials(env, credentials);
-  const webhookConfigured =
-    (configuredValue(credentials?.webhookSecret) ??
-      configuredValue(env.RAZORPAY_WEBHOOK_SECRET)) !== null;
-  const canProvisionTestPlans = providerCredentials?.keyId.startsWith("rzp_test_") === true;
-  const providerReady =
-    providerCredentials !== null &&
-    (providerCredentials.keyId.startsWith("rzp_test_") || webhookConfigured);
-  const providerPlanIds: Record<LudoPaidPlanCode, string | null> = {
-    PLUS:
-      configuredValue(planIds?.plusPlanId) ??
-      configuredValue(env.RAZORPAY_LUDO_PLUS_PLAN_ID),
-    PRO: configuredValue(planIds?.proPlanId) ?? configuredValue(env.RAZORPAY_LUDO_PRO_PLAN_ID),
-  };
+  // Membership uses the same Standard Checkout order flow as Add Coins. It
+  // therefore needs only the shared key pair; separate Razorpay plan IDs,
+  // webhook secrets and admin feature switches must never block checkout.
+  const checkoutConfigured = razorpayCredentials(env, credentials) !== null;
 
   const plans = Object.fromEntries(
-    (Object.keys(providerPlanIds) as LudoPaidPlanCode[]).map((plan) => {
-      const checkoutConfigured =
-        providerReady && (providerPlanIds[plan] !== null || canProvisionTestPlans);
-      const purchasable = settingEnabled && checkoutConfigured;
-      const availabilityReason: LudoPlanAvailabilityReason | null = !settingEnabled
-        ? "PURCHASES_DISABLED"
-        : !providerReady
-          ? "PAYMENT_NOT_CONFIGURED"
-          : providerPlanIds[plan] === null && !canProvisionTestPlans
-            ? "PLAN_NOT_CONFIGURED"
-            : null;
+    (["PLUS", "PRO"] as LudoPaidPlanCode[]).map((plan) => {
       return [
         plan,
         {
           checkoutConfigured,
-          purchasable,
-          availabilityReason,
-          providerPlanId: providerPlanIds[plan],
+          purchasable: checkoutConfigured,
+          availabilityReason: checkoutConfigured ? null : "PAYMENT_NOT_CONFIGURED",
         },
       ];
     }),
   ) as LudoPurchaseAvailability["plans"];
 
-  // The legacy runtime boolean is consumed globally by older clients, so it
-  // is true only when both advertised paid plans can actually open checkout.
-  const checkoutConfigured = plans.PLUS.checkoutConfigured && plans.PRO.checkoutConfigured;
   return {
-    settingEnabled,
     checkoutConfigured,
-    purchaseEnabled: settingEnabled && checkoutConfigured,
+    purchaseEnabled: checkoutConfigured,
     plans,
   };
 };

@@ -30,7 +30,7 @@ import type {
   LudoServerEventType,
 } from "../schemas/ludo.schema.js";
 import type { LudoRealtimeHub } from "../sockets/ludo-hub.js";
-import { ludoPurchaseAvailability } from "./ludo-subscription-catalog.js";
+import { ludoPurchaseAvailability, razorpayCredentials } from "./ludo-subscription-catalog.js";
 
 interface LudoRuntimeConfig {
   enabled: boolean;
@@ -41,7 +41,6 @@ interface LudoRuntimeConfig {
   maintenanceMode: boolean;
   textChatEnabled: boolean;
   voiceEnabled: boolean;
-  subscriptionPurchaseEnabled: boolean;
   turnDurationSeconds: number;
   reconnectionGraceSeconds: number;
   matchAcceptanceSeconds: number;
@@ -50,8 +49,6 @@ interface LudoRuntimeConfig {
   chatMaxCharacters: number;
   chatRateLimitPer10Seconds: number;
   minimumSupportedAppVersion: string;
-  plusPlanName: string;
-  proPlanName: string;
   quickMessages: string[];
   freeReactions: string[];
   engine: {
@@ -149,7 +146,6 @@ export class LudoService {
       maintenanceMode,
       textChatEnabled,
       voiceEnabled,
-      subscriptionPurchaseEnabled,
       turnDurationSeconds,
       reconnectionGraceSeconds,
       matchAcceptanceSeconds,
@@ -158,8 +154,6 @@ export class LudoService {
       chatMaxCharacters,
       chatRateLimitPer10Seconds,
       minimumSupportedAppVersion,
-      plusPlanName,
-      proPlanName,
       quickMessagesRaw,
       freeReactionCount,
       pawnsPerPlayer,
@@ -175,7 +169,6 @@ export class LudoService {
       this.settings.getBoolean("game.ludo.maintenanceMode"),
       this.settings.getBoolean("game.ludo.textChatEnabled"),
       this.settings.getBoolean("game.ludo.voiceEnabled"),
-      this.settings.getBoolean("game.ludo.subscriptionPurchaseEnabled"),
       this.settings.getNumber("game.ludo.turnDurationSeconds"),
       this.settings.getNumber("game.ludo.reconnectionGraceSeconds"),
       this.settings.getNumber("game.ludo.matchAcceptanceSeconds"),
@@ -184,8 +177,6 @@ export class LudoService {
       this.settings.getNumber("game.ludo.chatMaxCharacters"),
       this.settings.getNumber("game.ludo.chatRateLimitPer10Seconds"),
       this.settings.getString("game.ludo.minimumSupportedAppVersion"),
-      this.settings.getString("game.ludo.plusPlanName"),
-      this.settings.getString("game.ludo.proPlanName"),
       this.settings.getString("game.ludo.quickMessages"),
       this.settings.getNumber("game.ludo.freeReactionCount"),
       this.settings.getNumber("game.ludo.pawnsPerPlayer"),
@@ -202,7 +193,6 @@ export class LudoService {
       maintenanceMode,
       textChatEnabled,
       voiceEnabled,
-      subscriptionPurchaseEnabled,
       turnDurationSeconds,
       reconnectionGraceSeconds,
       matchAcceptanceSeconds,
@@ -211,8 +201,6 @@ export class LudoService {
       chatMaxCharacters,
       chatRateLimitPer10Seconds,
       minimumSupportedAppVersion,
-      plusPlanName,
-      proPlanName,
       quickMessages: parseStringList(quickMessagesRaw, ["HELLO", "HI"]),
       freeReactions: QUICK_REACTIONS.slice(0, freeReactionCount),
       engine: {
@@ -262,18 +250,20 @@ export class LudoService {
   }
 
   async getConfig(userId: string): Promise<Record<string, unknown>> {
-    const [config, entitlement, plusPlanId, proPlanId] = await Promise.all([
+    const [config, entitlement, settingKeyId, settingKeySecret] = await Promise.all([
       this.runtimeConfig(),
       this.effectiveEntitlement(userId),
-      this.settings.getString("game.ludo.plusPlanId"),
-      this.settings.getString("game.ludo.proPlanId"),
+      this.settings.getString("payment.razorpay.keyId"),
+      this.settings.getString("payment.razorpay.keySecret"),
     ]);
     const voiceIceServers =
       config.voiceEnabled && entitlement.entitlements.voiceChat ? this.voiceIceServers() : [];
     const purchaseAvailability = ludoPurchaseAvailability(
       this.env,
-      config.subscriptionPurchaseEnabled,
-      { plusPlanId, proPlanId },
+      razorpayCredentials(this.env, {
+        keyId: settingKeyId,
+        keySecret: settingKeySecret,
+      }) ?? undefined,
     );
     return {
       enabled: config.enabled,
