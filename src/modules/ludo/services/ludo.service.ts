@@ -2109,6 +2109,27 @@ export class LudoService {
     }
 
     const config = await this.runtimeConfig();
+
+    // Retry pairing for queued modes. Matching used to run ONLY at the moment
+    // a player joined the queue — if the other candidate's socket was
+    // registering or reconnecting at that instant, the attempt failed and was
+    // never retried, leaving everyone "finding players" until queue timeout.
+    // This sweep (every 3s) makes pairing eventually consistent and fast.
+    const queuedByMode = await this.prisma.ludoQueueEntry.groupBy({
+      by: ["mode"],
+      where: { status: "QUEUED", expiresAt: { gt: now } },
+      _count: { mode: true },
+    });
+    for (const group of queuedByMode) {
+      if (group._count.mode < roomPlayerCount(group.mode)) continue;
+      // A full sweep may seat several rooms (e.g. 4 queued in 2-player mode).
+      for (let round = 0; round < 5; round++) {
+        const match = await this.tryCreateMatch(group.mode, config).catch(() => null);
+        if (!match) break;
+        this.publishMatchFound(match);
+      }
+    }
+
     const timedOutRooms = await this.prisma.ludoRoom.findMany({
       where: { status: "ACTIVE", turnDeadline: { lte: now } },
       take: 100,

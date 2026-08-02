@@ -289,21 +289,40 @@ export class GameService {
       return;
     }
 
-    if (onlineQueue.includes(userId)) {
-      this.hub.send(userId, this.hub.event("ttt.matchmaking.joined", { searching: true }));
-      return;
-    }
-    const opponentIndex = onlineQueue.findIndex(
-      (candidate) => candidate !== userId && this.hub.session(candidate) !== undefined,
-    );
-    if (opponentIndex < 0) {
-      onlineQueue.push(userId);
-      this.hub.send(userId, this.hub.event("ttt.matchmaking.joined", { searching: true }));
-      return;
+    // Always rescan, even if this user is already queued — clients re-send
+    // join after every reconnect, and an early return here left two queued
+    // users unable to ever pair (the original "stuck on searching" bug).
+    let selfIndex = onlineQueue.indexOf(userId);
+    while (selfIndex >= 0) {
+      onlineQueue.splice(selfIndex, 1);
+      selfIndex = onlineQueue.indexOf(userId);
     }
 
-    const opponentId = onlineQueue.splice(opponentIndex, 1)[0]!;
-    await this.assertCanStart(opponentId);
+    let opponentId: string | null = null;
+    for (;;) {
+      const opponentIndex = onlineQueue.findIndex(
+        (candidate) => candidate !== userId && this.hub.session(candidate) !== undefined,
+      );
+      if (opponentIndex < 0) {
+        onlineQueue.push(userId);
+        this.hub.send(userId, this.hub.event("ttt.matchmaking.joined", { searching: true }));
+        return;
+      }
+      const candidateId = onlineQueue.splice(opponentIndex, 1)[0]!;
+      try {
+        await this.assertCanStart(candidateId);
+        opponentId = candidateId;
+        break;
+      } catch {
+        // Candidate can no longer start (daily limit / feature disabled) —
+        // tell them and keep scanning instead of failing this user's join.
+        this.hub.send(
+          candidateId,
+          this.hub.event("ttt.matchmaking.left", { searching: false }),
+        );
+      }
+    }
+    if (!opponentId) return; // unreachable; narrows the type
     const first = Math.random() < 0.5 ? opponentId : userId;
     const second = first === opponentId ? userId : opponentId;
     const initial = initialState();
