@@ -63,7 +63,14 @@ export const pawnMoveEventSchema = event(
 );
 export const quickChatEventSchema = event(
   "chat.quick.send",
-  z.object({ message: z.string().trim().min(1).max(32).regex(/^[A-Z0-9_]+$/) }),
+  z.object({
+    message: z
+      .string()
+      .trim()
+      .min(1)
+      .max(32)
+      .regex(/^[A-Z0-9_]+$/),
+  }),
 );
 export const textChatEventSchema = event(
   "chat.text.send",
@@ -120,6 +127,44 @@ export const socketPingEventSchema = z.object({
   payload: z.object({ clientTimestamp: clientTimestampSchema.optional() }),
 });
 
+export const tttMatchmakingJoinEventSchema = event("ttt.matchmaking.join", z.object({}));
+export const tttMatchmakingLeaveEventSchema = event("ttt.matchmaking.leave", z.object({}));
+export const tttStateRequestEventSchema = event("ttt.state.request", z.object({}));
+export const tttMoveEventSchema = event(
+  "ttt.move",
+  z.object({ cell: z.number().int().min(0).max(8) }),
+);
+export const tttMatchLeaveEventSchema = event("ttt.match.leave", z.object({}));
+export const tttQuickChatEventSchema = event(
+  "ttt.chat.quick.send",
+  z.object({
+    message: z
+      .string()
+      .trim()
+      .min(1)
+      .max(32)
+      .regex(/^[A-Z0-9_]+$/),
+  }),
+);
+export const tttTextChatEventSchema = event(
+  "ttt.chat.text.send",
+  z.object({ message: z.string().trim().min(1).max(160) }),
+);
+export const tttVoiceJoinEventSchema = event("ttt.voice.session.join", z.object({}));
+export const tttVoiceLeaveEventSchema = event("ttt.voice.session.leave", z.object({}));
+export const tttVoiceOfferEventSchema = event(
+  "ttt.voice.offer",
+  voiceOfferEventSchema.shape.payload,
+);
+export const tttVoiceAnswerEventSchema = event(
+  "ttt.voice.answer",
+  voiceAnswerEventSchema.shape.payload,
+);
+export const tttVoiceIceEventSchema = event(
+  "ttt.voice.ice_candidate",
+  voiceIceEventSchema.shape.payload,
+);
+
 export const clientEventSchema = z.discriminatedUnion("type", [
   socketAuthenticateEventSchema,
   matchmakingJoinEventSchema,
@@ -143,6 +188,18 @@ export const clientEventSchema = z.discriminatedUnion("type", [
   playerMuteEventSchema,
   roomLeaveEventSchema,
   socketPingEventSchema,
+  tttMatchmakingJoinEventSchema,
+  tttMatchmakingLeaveEventSchema,
+  tttStateRequestEventSchema,
+  tttMoveEventSchema,
+  tttMatchLeaveEventSchema,
+  tttQuickChatEventSchema,
+  tttTextChatEventSchema,
+  tttVoiceJoinEventSchema,
+  tttVoiceLeaveEventSchema,
+  tttVoiceOfferEventSchema,
+  tttVoiceAnswerEventSchema,
+  tttVoiceIceEventSchema,
 ]);
 export type LudoClientEvent = z.infer<typeof clientEventSchema>;
 
@@ -180,6 +237,12 @@ export const SERVER_EVENT_TYPES = [
   "entitlement.updated",
   "socket.pong",
   "game.error",
+  "ttt.matchmaking.joined",
+  "ttt.matchmaking.left",
+  "ttt.match.found",
+  "ttt.match.updated",
+  "ttt.match.finished",
+  "ttt.chat.received",
 ] as const;
 export type LudoServerEventType = (typeof SERVER_EVENT_TYPES)[number];
 
@@ -202,8 +265,14 @@ export const createSubscriptionOrderSchema = z.object({ plan: z.enum(["PLUS", "P
 export type CreateSubscriptionOrderInput = z.infer<typeof createSubscriptionOrderSchema>;
 
 export const verifySubscriptionSchema = z.object({
-  subscriptionId: z.string().regex(/^sub_[A-Za-z0-9]+$/).max(100),
-  paymentId: z.string().regex(/^pay_[A-Za-z0-9]+$/).max(100),
+  subscriptionId: z
+    .string()
+    .regex(/^sub_[A-Za-z0-9]+$/)
+    .max(100),
+  paymentId: z
+    .string()
+    .regex(/^pay_[A-Za-z0-9]+$/)
+    .max(100),
   signature: z.string().regex(/^[a-f0-9]{64}$/i),
 });
 export type VerifySubscriptionInput = z.infer<typeof verifySubscriptionSchema>;

@@ -100,14 +100,21 @@ export class LudoSubscriptionService {
   ) {}
 
   async plans(): Promise<Record<string, unknown>[]> {
-    const [settingEnabled, plusName, proName, plusPlanId, proPlanId] = await Promise.all([
-      this.settings.getBoolean("game.ludo.subscriptionPurchaseEnabled"),
-      this.settings.getString("game.ludo.plusPlanName"),
-      this.settings.getString("game.ludo.proPlanName"),
-      this.settings.getString("game.ludo.plusPlanId"),
-      this.settings.getString("game.ludo.proPlanId"),
-    ]);
-    const availability = ludoPurchaseAvailability(this.env, settingEnabled, { plusPlanId, proPlanId });
+    const [settingEnabled, plusName, proName, plusPlanId, proPlanId, credentials] =
+      await Promise.all([
+        this.settings.getBoolean("game.ludo.subscriptionPurchaseEnabled"),
+        this.settings.getString("game.ludo.plusPlanName"),
+        this.settings.getString("game.ludo.proPlanName"),
+        this.settings.getString("game.ludo.plusPlanId"),
+        this.settings.getString("game.ludo.proPlanId"),
+        this.credentials(),
+      ]);
+    const availability = ludoPurchaseAvailability(
+      this.env,
+      settingEnabled,
+      { plusPlanId, proPlanId },
+      credentials ?? undefined,
+    );
     const names = {
       FREE: "Free",
       PLUS: plusName.trim() || "Ludo Plus",
@@ -137,12 +144,18 @@ export class LudoSubscriptionService {
   }
 
   async purchaseAvailability(): Promise<LudoPurchaseAvailability> {
-    const [settingEnabled, plusPlanId, proPlanId] = await Promise.all([
+    const [settingEnabled, plusPlanId, proPlanId, credentials] = await Promise.all([
       this.settings.getBoolean("game.ludo.subscriptionPurchaseEnabled"),
       this.settings.getString("game.ludo.plusPlanId"),
       this.settings.getString("game.ludo.proPlanId"),
+      this.credentials(),
     ]);
-    return ludoPurchaseAvailability(this.env, settingEnabled, { plusPlanId, proPlanId });
+    return ludoPurchaseAvailability(
+      this.env,
+      settingEnabled,
+      { plusPlanId, proPlanId },
+      credentials ?? undefined,
+    );
   }
 
   async current(userId: string): Promise<Record<string, unknown>> {
@@ -199,7 +212,7 @@ export class LudoSubscriptionService {
       throw new ForbiddenError("Ludo subscriptions are not available");
     }
     const planAvailability = availability.plans[input.plan];
-    const credentials = this.credentials();
+    const credentials = await this.credentials();
     const planId = planAvailability.providerPlanId;
     if (!planAvailability.purchasable || !credentials || !planId) {
       throw new AppError("This subscription plan is not configured", 503, "PAYMENT_NOT_CONFIGURED");
@@ -276,7 +289,7 @@ export class LudoSubscriptionService {
       where: { razorpaySubscriptionId: input.subscriptionId },
     });
     if (!row || row.userId !== userId) throw new NotFoundError("Ludo subscription not found");
-    this.verifyCheckoutSignature(input.paymentId, input.subscriptionId, input.signature);
+    await this.verifyCheckoutSignature(input.paymentId, input.subscriptionId, input.signature);
     const provider = await this.razorpay<RazorpaySubscription>(
       `/subscriptions/${encodeURIComponent(input.subscriptionId)}`,
       { method: "GET" },
@@ -511,8 +524,15 @@ export class LudoSubscriptionService {
     };
   }
 
-  private credentials(): { keyId: string; keySecret: string } | null {
-    return razorpayCredentials(this.env);
+  private async credentials(): Promise<{ keyId: string; keySecret: string } | null> {
+    const [settingKeyId, settingKeySecret] = await Promise.all([
+      this.settings.getString("payment.razorpay.keyId"),
+      this.settings.getString("payment.razorpay.keySecret"),
+    ]);
+    return razorpayCredentials(this.env, {
+      keyId: settingKeyId,
+      keySecret: settingKeySecret,
+    });
   }
 
   private assertProviderPlan(plan: RazorpayPlan, planId: string, pricePaise: number): void {
@@ -533,12 +553,12 @@ export class LudoSubscriptionService {
     }
   }
 
-  private verifyCheckoutSignature(
+  private async verifyCheckoutSignature(
     paymentId: string,
     subscriptionId: string,
     signature: string,
-  ): void {
-    const credentials = this.credentials();
+  ): Promise<void> {
+    const credentials = await this.credentials();
     if (!credentials)
       throw new AppError("Razorpay is not configured", 503, "PAYMENT_NOT_CONFIGURED");
     const expected = createHmac("sha256", credentials.keySecret)
@@ -574,7 +594,7 @@ export class LudoSubscriptionService {
     path: string,
     init: { method: "GET" | "POST"; body?: Record<string, unknown> },
   ): Promise<T> {
-    const credentials = this.credentials();
+    const credentials = await this.credentials();
     if (!credentials)
       throw new AppError("Razorpay is not configured", 503, "PAYMENT_NOT_CONFIGURED");
     const response = await fetch(`${this.env.RAZORPAY_API_BASE_URL}${path}`, {

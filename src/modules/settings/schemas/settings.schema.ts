@@ -26,6 +26,24 @@ export interface SettingDefinition {
 export const SETTINGS_REGISTRY: readonly SettingDefinition[] = [
   // --- Add Coins (Razorpay package) ---
   {
+    key: "payment.razorpay.keyId",
+    type: "STRING",
+    category: "Add Coins",
+    label: "Razorpay key ID",
+    description:
+      "Server-side key used by Add Coins and Ludo Razorpay flows. Falls back to environment variables when empty.",
+    default: "",
+  },
+  {
+    key: "payment.razorpay.keySecret",
+    type: "STRING",
+    category: "Add Coins",
+    label: "Razorpay key secret",
+    description: "Secret is never returned in responses. Leave blank to keep the existing value.",
+    default: "",
+    secret: true,
+  },
+  {
     key: "coinPurchase.enabled",
     type: "BOOLEAN",
     category: "Add Coins",
@@ -317,14 +335,37 @@ export const SETTINGS_REGISTRY: readonly SettingDefinition[] = [
     max: 1_000_000,
   },
   {
-    key: "game.ttt.dailyLimit",
+    key: "game.ttt.freeDailyLimit",
     type: "NUMBER",
     category: "Games",
-    label: "Tic-tac-toe daily match limit",
-    description: "Max matches a user may start per day.",
-    default: "5",
+    label: "Free daily matches",
+    description: "Daily Tic-tac-toe matches for users without a paid membership.",
+    default: "3",
     min: 0,
     max: 1000,
+    integer: true,
+  },
+  {
+    key: "game.ttt.plusDailyLimit",
+    type: "NUMBER",
+    category: "Games",
+    label: "Plus daily matches",
+    description: "Daily Tic-tac-toe matches for active Plus members.",
+    default: "10",
+    min: 0,
+    max: 1000,
+    integer: true,
+  },
+  {
+    key: "game.ttt.proDailyLimit",
+    type: "NUMBER",
+    category: "Games",
+    label: "Pro daily matches",
+    description: "Daily Tic-tac-toe matches for active Pro members.",
+    default: "25",
+    min: 0,
+    max: 1000,
+    integer: true,
   },
   // --- Roulette (virtual-coin roulette game) ---
   // General
@@ -835,7 +876,8 @@ export const SETTINGS_REGISTRY: readonly SettingDefinition[] = [
     type: "STRING",
     category: "Ludo",
     label: "Free quick messages",
-    description: "JSON string array of the fixed free-plan greetings (the server always validates codes).",
+    description:
+      "JSON string array of the fixed free-plan greetings (the server always validates codes).",
     default: '["HELLO","HI"]',
   },
   {
@@ -843,7 +885,8 @@ export const SETTINGS_REGISTRY: readonly SettingDefinition[] = [
     type: "NUMBER",
     category: "Ludo",
     label: "Free reaction count",
-    description: "How many configured reaction codes are exposed to free users (maximum three in this release).",
+    description:
+      "How many configured reaction codes are exposed to free users (maximum three in this release).",
     default: "3",
     min: 0,
     max: 3,

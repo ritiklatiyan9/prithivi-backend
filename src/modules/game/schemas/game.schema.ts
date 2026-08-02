@@ -24,6 +24,9 @@ export interface TttConfigDto {
   winCoins: number;
   hintWinCoins: number;
   difficulty: Difficulty;
+  membershipPlan: "FREE" | "PLUS" | "PRO";
+  textChatEnabled: boolean;
+  voiceChatEnabled: boolean;
   dailyLimit: number;
   playedToday: number;
   remaining: number;

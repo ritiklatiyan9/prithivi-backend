@@ -173,7 +173,8 @@ export const buildContainer = (app: FastifyInstance): Container => {
   );
   const appAssetsService = new AppAssetsService(prisma);
   const missionsService = new MissionsService(prisma, notificationsService);
-  const gameService = new GameService(prisma, settingsService, notificationsService);
+  const ludoHub = new LudoRealtimeHub();
+  const gameService = new GameService(prisma, settingsService, notificationsService, ludoHub);
   const rouletteService = new RouletteService(prisma, settingsService, notificationsService);
   const coinPurchaseService = new CoinPurchaseService(
     prisma,
@@ -181,7 +182,6 @@ export const buildContainer = (app: FastifyInstance): Container => {
     notificationsService,
     env,
   );
-  const ludoHub = new LudoRealtimeHub();
   const ludoService = new LudoService(prisma, settingsService, notificationsService, ludoHub, env);
   const ludoSubscriptionService = new LudoSubscriptionService(
     prisma,

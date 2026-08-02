@@ -4,6 +4,7 @@ import { AppError, BadRequestError, NotFoundError } from "../../../common/errors
 import type { Env } from "../../../config/env.js";
 import type { NotificationsService } from "../../notifications/services/notifications.service.js";
 import type { SettingsService } from "../../settings/services/settings.service.js";
+import { razorpayCredentials } from "../../ludo/services/ludo-subscription-catalog.js";
 import type {
   CoinPurchaseConfigDto,
   CoinPurchaseOrderDto,
@@ -41,13 +42,14 @@ export class CoinPurchaseService {
   ) {}
 
   async getConfig(): Promise<CoinPurchaseConfigDto> {
-    const [enabled, priceRupees, coinsPerPack, maxPacks] = await Promise.all([
+    const [enabled, priceRupees, coinsPerPack, maxPacks, credentials] = await Promise.all([
       this.settings.getBoolean("coinPurchase.enabled"),
       this.settings.getNumber("coinPurchase.packPriceRupees"),
       this.settings.getNumber("coinPurchase.coinsPerPack"),
       this.settings.getNumber("coinPurchase.maxPacks"),
+      this.credentials(),
     ]);
-    const configured = this.credentials() !== null;
+    const configured = credentials !== null;
     return {
       enabled: enabled && configured,
       configured,
@@ -106,7 +108,7 @@ export class CoinPurchaseService {
         packCount: input.packCount,
       },
     });
-    const credentials = this.credentials();
+    const credentials = await this.credentials();
     if (!credentials) {
       throw new AppError("Razorpay is not configured", 503, "PAYMENT_NOT_CONFIGURED");
     }
@@ -133,7 +135,7 @@ export class CoinPurchaseService {
     if (purchase.status === "CAPTURED") {
       return this.capturedResult(purchase);
     }
-    this.verifySignature(purchase.razorpayOrderId, input.paymentId, input.signature);
+    await this.verifySignature(purchase.razorpayOrderId, input.paymentId, input.signature);
 
     let payment = await this.razorpay<RazorpayPayment>(
       `/payments/${encodeURIComponent(input.paymentId)}`,
@@ -163,7 +165,7 @@ export class CoinPurchaseService {
    * idempotent ledger transaction used by normal verification is applied.
    */
   async reconcile(userId: string): Promise<CoinPurchaseRecoveryDto> {
-    if (!this.credentials()) return { recoveredPurchases: 0, coinsCredited: 0 };
+    if (!(await this.credentials())) return { recoveredPurchases: 0, coinsCredited: 0 };
     const pending = await this.prisma.coinPurchase.findMany({
       where: {
         userId,
@@ -302,8 +304,12 @@ export class CoinPurchaseService {
     };
   }
 
-  private verifySignature(orderId: string, paymentId: string, received: string): void {
-    const credentials = this.credentials();
+  private async verifySignature(
+    orderId: string,
+    paymentId: string,
+    received: string,
+  ): Promise<void> {
+    const credentials = await this.credentials();
     if (!credentials) {
       throw new AppError("Razorpay is not configured", 503, "PAYMENT_NOT_CONFIGURED");
     }
@@ -327,17 +333,22 @@ export class CoinPurchaseService {
     }
   }
 
-  private credentials(): { keyId: string; keySecret: string } | null {
-    const keyId = this.config.RAZORPAY_KEY_ID?.trim() ?? "";
-    const keySecret = this.config.RAZORPAY_KEY_SECRET?.trim() ?? "";
-    return keyId && keySecret ? { keyId, keySecret } : null;
+  private async credentials(): Promise<{ keyId: string; keySecret: string } | null> {
+    const [settingKeyId, settingKeySecret] = await Promise.all([
+      this.settings.getString("payment.razorpay.keyId"),
+      this.settings.getString("payment.razorpay.keySecret"),
+    ]);
+    return razorpayCredentials(this.config, {
+      keyId: settingKeyId,
+      keySecret: settingKeySecret,
+    });
   }
 
   private async razorpay<T>(
     path: string,
     options: { method: "GET" | "POST"; body?: Record<string, unknown> },
   ): Promise<T> {
-    const credentials = this.credentials();
+    const credentials = await this.credentials();
     if (!credentials) {
       throw new AppError("Razorpay is not configured", 503, "PAYMENT_NOT_CONFIGURED");
     }

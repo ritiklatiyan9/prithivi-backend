@@ -60,11 +60,17 @@ export const configuredValue = (value: string | undefined): string | null => {
   return trimmed && !PLACEHOLDER_VALUE.test(trimmed) ? trimmed : null;
 };
 
+export interface RazorpayCredentialOverrides {
+  keyId?: string;
+  keySecret?: string;
+}
+
 export const razorpayCredentials = (
   env: Pick<Env, "RAZORPAY_KEY_ID" | "RAZORPAY_KEY_SECRET">,
+  overrides: RazorpayCredentialOverrides = {},
 ): { keyId: string; keySecret: string } | null => {
-  const keyId = configuredValue(env.RAZORPAY_KEY_ID);
-  const keySecret = configuredValue(env.RAZORPAY_KEY_SECRET);
+  const keyId = configuredValue(overrides.keyId) ?? configuredValue(env.RAZORPAY_KEY_ID);
+  const keySecret = configuredValue(overrides.keySecret) ?? configuredValue(env.RAZORPAY_KEY_SECRET);
   return keyId && keySecret ? { keyId, keySecret } : null;
 };
 
@@ -97,9 +103,11 @@ export const ludoPurchaseAvailability = (
     plusPlanId?: string;
     proPlanId?: string;
   },
+  credentials?: RazorpayCredentialOverrides,
 ): LudoPurchaseAvailability => {
   const providerReady =
-    razorpayCredentials(env) !== null && configuredValue(env.RAZORPAY_WEBHOOK_SECRET) !== null;
+    razorpayCredentials(env, credentials) !== null &&
+    configuredValue(env.RAZORPAY_WEBHOOK_SECRET) !== null;
   const providerPlanIds: Record<LudoPaidPlanCode, string | null> = {
     PLUS:
       configuredValue(planIds?.plusPlanId) ??
