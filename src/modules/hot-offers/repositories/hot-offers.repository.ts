@@ -134,10 +134,15 @@ export class HotOffersRepository {
 
   async listOffers(
     query: AdminListOffersQuery,
-    params: { publishedOnly: boolean },
+    params: { publishedOnly: boolean; hideCompletedFor?: Set<string> },
   ): Promise<[OfferWithCategory[], number]> {
+    const completedIds = [...(params.hideCompletedFor ?? [])];
     const where: Prisma.OfferWhereInput = {
       deletedAt: null,
+      // Drop offers the user completed when the admin picked HIDE for them.
+      ...(completedIds.length > 0
+        ? { NOT: { completedBehavior: "HIDE" as const, id: { in: completedIds } } }
+        : {}),
       ...(params.publishedOnly
         ? {
             status: "PUBLISHED",
@@ -538,6 +543,23 @@ export class HotOffersRepository {
   /** Approved submissions for an offer (maxRewards). */
   countApproved(offerId: string): Promise<number> {
     return this.prisma.offerSubmission.count({ where: { offerId, status: "APPROVED" } });
+  }
+
+  /** Ids of offers this user completed (APPROVED submission). Uses [userId,status]. */
+  async approvedOfferIds(userId: string): Promise<Set<string>> {
+    const rows = await this.prisma.offerSubmission.findMany({
+      where: { userId, status: "APPROVED" },
+      select: { offerId: true },
+    });
+    return new Set(rows.map((row) => row.offerId));
+  }
+
+  async hasApprovedSubmission(userId: string, offerId: string): Promise<boolean> {
+    const found = await this.prisma.offerSubmission.findFirst({
+      where: { userId, offerId, status: "APPROVED" },
+      select: { id: true },
+    });
+    return found !== null;
   }
 
   /** This user's image-upload attempts for an offer since [since] (dailyLimit). */

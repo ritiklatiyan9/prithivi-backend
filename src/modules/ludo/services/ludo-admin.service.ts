@@ -429,7 +429,7 @@ export class LudoAdminService {
       status: player.status,
       position: player.finishedPosition,
       captures: player.captures,
-      connected: this.hub.session(player.userId)?.gameId === row.id,
+      connected: this.hub.session(player.userId)?.ludoGameId === row.id,
     }));
     return {
       id: row.id,

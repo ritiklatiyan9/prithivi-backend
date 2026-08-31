@@ -46,15 +46,23 @@ export class HotOffersController {
     request: FastifyRequest<{ Querystring: ListOffersQuery }>,
     reply: FastifyReply,
   ): Promise<void> => {
-    const { items, meta } = await this.service.listPublicOffers(request.query);
-    this.cachePublic(reply).send(success(items, meta));
+    const userId = request.user?.sub;
+    const { items, meta } = await this.service.listPublicOffers(request.query, userId);
+    // Personalized responses must never land in a shared CDN/proxy cache.
+    (userId ? reply.header("Cache-Control", "private, no-store") : this.cachePublic(reply)).send(
+      success(items, meta),
+    );
   };
 
   getOffer = async (
     request: FastifyRequest<{ Params: SlugParams }>,
     reply: FastifyReply,
   ): Promise<void> => {
-    this.cachePublic(reply).send(success(await this.service.getPublicOffer(request.params.slug)));
+    const userId = request.user?.sub;
+    const offer = await this.service.getPublicOffer(request.params.slug, userId);
+    (userId ? reply.header("Cache-Control", "private, no-store") : this.cachePublic(reply)).send(
+      success(offer),
+    );
   };
 
   getOfferComment = async (

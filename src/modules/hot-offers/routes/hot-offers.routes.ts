@@ -66,6 +66,9 @@ export const hotOffersRoutes = async (app: FastifyInstance): Promise<void> => {
   app.get<{ Querystring: ListOffersQuery }>(
     "/offers",
     {
+      // optionalAuth: signed-in callers get a personalized list (their
+      // completed offers hidden/flagged per the admin's completedBehavior).
+      preHandler: [optionalAuth],
       schema: {
         tags: ["hot-offers"],
         summary: "Published offers with search, category filter, sorting and pagination",
@@ -78,6 +81,7 @@ export const hotOffersRoutes = async (app: FastifyInstance): Promise<void> => {
   app.get<{ Params: SlugParams }>(
     "/offers/:slug",
     {
+      preHandler: [optionalAuth],
       schema: {
         tags: ["hot-offers"],
         summary: "Published offer details",

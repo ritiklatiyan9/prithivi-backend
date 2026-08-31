@@ -1,7 +1,13 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type WebSocket from "ws";
 import { AppError, BadRequestError, UnauthorizedError } from "../../../common/errors.js";
-import { clientEventSchema, type LudoClientEvent } from "../schemas/ludo.schema.js";
+import {
+  clientEventSchema,
+  type LudoClientEvent,
+  type LudoServerEvent,
+} from "../schemas/ludo.schema.js";
+import type { LudoService } from "../services/ludo.service.js";
+import type { LudoRealtimeHub } from "./ludo-hub.js";
 
 const gameIdOf = (event: { gameId?: string | null }): string => {
   if (!event.gameId) throw new BadRequestError("gameId is required");
@@ -13,6 +19,29 @@ const versionOf = (event: { expectedStateVersion?: number | null }): number => {
     throw new BadRequestError("expectedStateVersion is required");
   }
   return event.expectedStateVersion;
+};
+
+type ResumedGame = Awaited<ReturnType<LudoService["resumeActive"]>>;
+
+/** Kept as a small pure protocol seam so mixed mobile/backend rollouts can be
+ * regression-tested without opening a network listener. */
+export const buildSocketAuthenticatedEvent = (
+  hub: LudoRealtimeHub,
+  userId: string,
+  resumed: ResumedGame,
+): LudoServerEvent => {
+  const gameId = resumed?.gameId ?? null;
+  return hub.event(
+    "socket.authenticated",
+    {
+      userId,
+      activeGameId: gameId,
+      gameId,
+      resumeToken: resumed?.resumeToken ?? null,
+    },
+    gameId,
+    resumed?.event.stateVersion ?? null,
+  );
 };
 
 export const registerLudoSocketGateway = (app: FastifyInstance): void => {
@@ -30,6 +59,8 @@ export const registerLudoSocketGateway = (app: FastifyInstance): void => {
     (socket: WebSocket, request: FastifyRequest) => {
       let userId: string | null = null;
       let authenticated = false;
+      let authenticationStarted = false;
+      let closed = false;
       let chain = Promise.resolve();
 
       const send = (event: ReturnType<typeof hub.event>): void => {
@@ -41,6 +72,13 @@ export const registerLudoSocketGateway = (app: FastifyInstance): void => {
           error instanceof AppError
             ? error
             : new AppError("Realtime request failed", 500, "INTERNAL_ERROR");
+        const actualStateVersion =
+          appError.details &&
+          typeof appError.details === "object" &&
+          "actualStateVersion" in appError.details &&
+          typeof appError.details.actualStateVersion === "number"
+            ? appError.details.actualStateVersion
+            : null;
         request.log.warn(
           {
             userId,
@@ -61,7 +99,7 @@ export const registerLudoSocketGateway = (app: FastifyInstance): void => {
               actionId: event && "actionId" in event ? event.actionId : undefined,
             },
             event?.gameId ?? null,
-            null,
+            actualStateVersion,
           ),
         );
       };
@@ -73,43 +111,62 @@ export const registerLudoSocketGateway = (app: FastifyInstance): void => {
 
       const dispatch = async (event: LudoClientEvent): Promise<void> => {
         if (event.type === "socket.authenticate") {
-          if (authenticated) throw new BadRequestError("Socket is already authenticated");
+          if (authenticated || authenticationStarted) {
+            throw new BadRequestError("Socket is already authenticated");
+          }
+          authenticationStarted = true;
           let claims: { sub?: string; email?: string; role?: string };
           try {
             claims = await app.jwt.verify(event.payload.accessToken);
           } catch {
-            throw new UnauthorizedError("Invalid access token");
+            throw new AppError("Invalid or expired access token", 401, "UNAUTHENTICATED");
           }
-          if (!claims.sub) throw new UnauthorizedError("Invalid access token subject");
+          if (!claims.sub) {
+            throw new AppError("Invalid access token subject", 401, "UNAUTHENTICATED");
+          }
           await ludo.assertSocketUser(claims.sub);
+          if (closed || socket.readyState !== socket.OPEN) {
+            throw new AppError("Socket authentication timed out", 408, "AUTHENTICATION_TIMEOUT");
+          }
           userId = claims.sub;
-          authenticated = true;
-          clearTimeout(authenticationTimer);
           hub.register({
             userId,
             socket,
             gameId: null,
+            ludoGameId: null,
             authenticatedAt: Date.now(),
             lastSeenAt: Date.now(),
           });
-          const resumed = await ludo.resumeActive(
-            userId,
-            event.payload.resumeToken,
-            event.payload.lastAcknowledgedStateVersion,
-          );
-          send(
-            hub.event("socket.authenticated", {
+          try {
+            const resumed = await ludo.resumeActive(
               userId,
-              activeGameId: resumed?.gameId ?? null,
-              resumeToken: resumed?.resumeToken ?? null,
-            }),
-          );
-          if (resumed) send(resumed.event);
-          request.log.info(
-            { userId, activeGameId: resumed?.gameId ?? null },
-            "ludo socket authenticated",
-          );
-          return;
+              event.payload.resumeToken,
+              event.payload.lastAcknowledgedStateVersion,
+            );
+            if (closed || socket.readyState !== socket.OPEN) {
+              throw new AppError("Socket authentication timed out", 408, "AUTHENTICATION_TIMEOUT");
+            }
+            authenticated = true;
+            clearTimeout(authenticationTimer);
+            send(buildSocketAuthenticatedEvent(hub, userId, resumed));
+            if (resumed) send(resumed.event);
+            request.log.info(
+              { userId, activeGameId: resumed?.gameId ?? null },
+              "ludo socket authenticated",
+            );
+            return;
+          } catch (error) {
+            const failedUserId = userId;
+            hub.unregister(failedUserId, socket);
+            userId = null;
+            void ludo.markDisconnected(failedUserId).catch((disconnectError) => {
+              request.log.warn(
+                { err: disconnectError, userId: failedUserId },
+                "failed to reconcile ludo presence after authentication error",
+              );
+            });
+            throw error;
+          }
         }
         if (!authenticated || !userId) throw new UnauthorizedError("Authenticate the socket first");
         hub.touch(userId);
@@ -268,6 +325,7 @@ export const registerLudoSocketGateway = (app: FastifyInstance): void => {
           socket.close(1009, "Message too large");
           return;
         }
+        let parsedEvent: LudoClientEvent | undefined;
         chain = chain
           .then(async () => {
             let value: unknown;
@@ -280,22 +338,34 @@ export const registerLudoSocketGateway = (app: FastifyInstance): void => {
             if (!parsed.success) {
               throw new BadRequestError("Invalid WebSocket event", parsed.error.flatten());
             }
-            await dispatch(parsed.data);
+            parsedEvent = parsed.data;
+            await dispatch(parsedEvent);
           })
-          .catch((error) => fail(error));
+          .catch((error) => {
+            fail(error, parsedEvent);
+            if (!authenticated) socket.close(4003, "Authentication failed");
+          });
       });
       socket.on("error", (error) => {
         hub.recordError();
         request.log.warn({ err: error, userId }, "ludo websocket error");
       });
       socket.on("close", () => {
+        closed = true;
         clearTimeout(authenticationTimer);
         if (!userId) return;
         const ownsSession = hub.session(userId)?.socket === socket;
         hub.unregister(userId, socket);
         if (ownsSession) {
-          void ludo.markDisconnected(userId);
-          void ttt.disconnectOnline(userId);
+          void ludo.markDisconnected(userId).catch((disconnectError) => {
+            request.log.warn({ err: disconnectError, userId }, "failed to persist ludo disconnect");
+          });
+          void ttt.disconnectOnline(userId).catch((disconnectError) => {
+            request.log.warn(
+              { err: disconnectError, userId },
+              "failed to reconcile tic-tac-toe disconnect",
+            );
+          });
         }
       });
     },

@@ -2,10 +2,15 @@ import { randomUUID } from "node:crypto";
 import WebSocket from "ws";
 import type { LudoServerEvent, LudoServerEventType } from "../schemas/ludo.schema.js";
 
+const MAX_BUFFERED_BYTES = 1024 * 1024;
+
 export interface LudoSocketSession {
   userId: string;
   socket: WebSocket;
+  /** Tic-tac-toe/legacy realtime route. Kept for backwards compatibility. */
   gameId: string | null;
+  /** Ludo has an independent route so another realtime game cannot steal it. */
+  ludoGameId?: string | null;
   authenticatedAt: number;
   lastSeenAt: number;
 }
@@ -36,6 +41,7 @@ export class LudoRealtimeHub {
       this.write(previous.socket, this.event("socket.session_replaced", {}));
       previous.socket.close(4001, "A newer session connected");
     }
+    session.ludoGameId ??= null;
     this.sessions.set(session.userId, session);
   }
 
@@ -50,6 +56,11 @@ export class LudoRealtimeHub {
   setGame(userId: string, gameId: string | null): void {
     const session = this.sessions.get(userId);
     if (session) session.gameId = gameId;
+  }
+
+  setLudoGame(userId: string, gameId: string | null): void {
+    const session = this.sessions.get(userId);
+    if (session) session.ludoGameId = gameId;
   }
 
   touch(userId: string): void {
@@ -70,6 +81,19 @@ export class LudoRealtimeHub {
     const excluded = new Set(options.excludeUserIds ?? []);
     for (const session of this.sessions.values()) {
       if (session.gameId === gameId && !excluded.has(session.userId)) {
+        this.write(session.socket, event);
+      }
+    }
+  }
+
+  broadcastLudoRoom(
+    gameId: string,
+    event: LudoServerEvent,
+    options: { excludeUserIds?: readonly string[] } = {},
+  ): void {
+    const excluded = new Set(options.excludeUserIds ?? []);
+    for (const session of this.sessions.values()) {
+      if (session.ludoGameId === gameId && !excluded.has(session.userId)) {
         this.write(session.socket, event);
       }
     }
@@ -104,6 +128,11 @@ export class LudoRealtimeHub {
 
   private write(socket: WebSocket, event: LudoServerEvent): boolean {
     if (socket.readyState !== WebSocket.OPEN) return false;
+    if (socket.bufferedAmount > MAX_BUFFERED_BYTES) {
+      this.socketErrors += 1;
+      socket.close(1013, "Realtime client is too slow");
+      return false;
+    }
     try {
       socket.send(JSON.stringify(event));
       return true;

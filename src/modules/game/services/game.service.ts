@@ -41,10 +41,23 @@ type OnlineGameState = GameState & {
   version: number;
 };
 
-const onlineQueue: string[] = [];
-const onlineInflight = new Set<string>();
+const onlineMatchTails = new Map<string, Promise<void>>();
 const onlineVoiceParticipants = new Map<string, Set<string>>();
 const ONLINE_QUICK_MESSAGES = new Set(["HELLO", "GOOD_MOVE", "WELL_PLAYED", "GOOD_GAME"]);
+
+function runOnlineMatchExclusive<T>(matchId: string, operation: () => Promise<T>): Promise<T> {
+  const previous = onlineMatchTails.get(matchId) ?? Promise.resolve();
+  const result = previous.then(operation, operation);
+  const tail = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  onlineMatchTails.set(matchId, tail);
+  void tail.then(() => {
+    if (onlineMatchTails.get(matchId) === tail) onlineMatchTails.delete(matchId);
+  });
+  return result;
+}
 
 type CachedMatch = {
   state: GameState;
@@ -82,6 +95,12 @@ const inflight = new Set<string>();
 
 // ponytail: queries are trivial one-liners, prisma used directly (AppAssetsService precedent) — add a repository if they grow.
 export class GameService {
+  // Pairing mutates an in-memory queue and performs asynchronous eligibility /
+  // persistence checks. Keep those operations in one FIFO critical section so
+  // reconnects and simultaneous joins cannot claim the same player twice.
+  private readonly onlineQueue: string[] = [];
+  private onlineMatchmakingTail: Promise<void> = Promise.resolve();
+
   constructor(
     private readonly prisma: PrismaClient,
     private readonly settings: SettingsService,
@@ -243,6 +262,67 @@ export class GameService {
     };
   }
 
+  private activeOnlineMatch(userId: string) {
+    return this.prisma.gameMatch.findFirst({
+      where: {
+        difficulty: "ONLINE",
+        status: "IN_PROGRESS",
+        OR: [{ userId }, { state: { path: ["oUserId"], equals: userId } }],
+      },
+      orderBy: { createdAt: "desc" },
+    });
+  }
+
+  private removeOnlineQueueEntries(userId: string): void {
+    let index = this.onlineQueue.indexOf(userId);
+    while (index >= 0) {
+      this.onlineQueue.splice(index, 1);
+      index = this.onlineQueue.indexOf(userId);
+    }
+  }
+
+  private enqueueOnlineUser(userId: string, front = false): void {
+    this.removeOnlineQueueEntries(userId);
+    if (front) this.onlineQueue.unshift(userId);
+    else this.onlineQueue.push(userId);
+  }
+
+  private runOnlineMatchmakingExclusive<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.onlineMatchmakingTail.then(operation, operation);
+    this.onlineMatchmakingTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  private async sendExistingOnlineMatch(
+    userId: string,
+    active: NonNullable<Awaited<ReturnType<GameService["activeOnlineMatch"]>>>,
+  ): Promise<void> {
+    const state = this.onlineState(active.state);
+    const session = this.hub.session(userId);
+    if (!session) throw new ConflictError("Realtime session is not connected");
+    // Ludo and TTT route independently in the hub, but simultaneous games are
+    // still disallowed: a player cannot fairly participate in both at once.
+    if (
+      session.ludoGameId != null ||
+      (session.gameId !== null && session.gameId !== active.id)
+    ) {
+      throw new ConflictError("Finish your current realtime game before joining Tic-tac-toe");
+    }
+    this.hub.setGame(userId, active.id);
+    this.hub.send(
+      userId,
+      this.hub.event(
+        "ttt.match.found",
+        { snapshot: await this.onlineSnapshot(active.id) },
+        active.id,
+        state.version,
+      ),
+    );
+  }
+
   private async onlineRowForMember(userId: string, matchId: string) {
     const row = await this.prisma.gameMatch.findUnique({ where: { id: matchId } });
     if (!row || row.difficulty !== "ONLINE") throw new NotFoundError("Online match not found");
@@ -262,111 +342,179 @@ export class GameService {
   }
 
   async joinOnlineMatchmaking(userId: string): Promise<void> {
-    await this.assertCanStart(userId);
-    const session = this.hub.session(userId);
-    if (!session) throw new ConflictError("Realtime session is not connected");
+    if (!this.hub.session(userId)) throw new ConflictError("Realtime session is not connected");
 
-    const active = await this.prisma.gameMatch.findFirst({
-      where: {
-        difficulty: "ONLINE",
-        status: "IN_PROGRESS",
-        OR: [{ userId }, { state: { path: ["oUserId"], equals: userId } }],
-      },
-      orderBy: { createdAt: "desc" },
-    });
-    if (active) {
-      const state = this.onlineState(active.state);
-      this.hub.setGame(userId, active.id);
-      this.hub.send(
-        userId,
-        this.hub.event(
-          "ttt.match.found",
-          { snapshot: await this.onlineSnapshot(active.id) },
-          active.id,
-          state.version,
-        ),
-      );
-      return;
-    }
+    await this.runOnlineMatchmakingExclusive(async () => {
+      const active = await this.activeOnlineMatch(userId);
+      if (active) {
+        this.removeOnlineQueueEntries(userId);
+        await this.sendExistingOnlineMatch(userId, active);
+        return;
+      }
+      await this.assertCanStart(userId);
 
-    // Always rescan, even if this user is already queued — clients re-send
-    // join after every reconnect, and an early return here left two queued
-    // users unable to ever pair (the original "stuck on searching" bug).
-    let selfIndex = onlineQueue.indexOf(userId);
-    while (selfIndex >= 0) {
-      onlineQueue.splice(selfIndex, 1);
-      selfIndex = onlineQueue.indexOf(userId);
-    }
+      const joiningSession = this.hub.session(userId);
+      if (!joiningSession) throw new ConflictError("Realtime session is not connected");
+      if (joiningSession.gameId !== null || joiningSession.ludoGameId != null) {
+        throw new ConflictError("Finish your current realtime game before joining Tic-tac-toe");
+      }
 
-    let opponentId: string | null = null;
-    for (;;) {
-      const opponentIndex = onlineQueue.findIndex(
-        (candidate) => candidate !== userId && this.hub.session(candidate) !== undefined,
-      );
-      if (opponentIndex < 0) {
-        onlineQueue.push(userId);
+      // A reconnect is an idempotent rescan: keep at most one queue row for the
+      // user, then look for another connected and unclaimed player.
+      this.removeOnlineQueueEntries(userId);
+      let opponentId: string | null = null;
+      for (;;) {
+        const opponentIndex = this.onlineQueue.findIndex(
+          (candidate) => candidate !== userId && this.hub.session(candidate) !== undefined,
+        );
+        if (opponentIndex < 0) {
+          this.enqueueOnlineUser(userId);
+          this.hub.send(userId, this.hub.event("ttt.matchmaking.joined", { searching: true }));
+          return;
+        }
+
+        const candidateId = this.onlineQueue.splice(opponentIndex, 1)[0]!;
+        try {
+          const candidateActive = await this.activeOnlineMatch(candidateId);
+          if (candidateActive) {
+            await this.sendExistingOnlineMatch(candidateId, candidateActive);
+            continue;
+          }
+          await this.assertCanStart(candidateId);
+          const candidateSession = this.hub.session(candidateId);
+          if (
+            !candidateSession ||
+            candidateSession.gameId !== null ||
+            candidateSession.ludoGameId != null
+          ) {
+            this.hub.send(
+              candidateId,
+              this.hub.event("ttt.matchmaking.left", { searching: false }),
+            );
+            continue;
+          }
+          opponentId = candidateId;
+          break;
+        } catch {
+          // A stale/disconnected/ineligible candidate must not wedge the next
+          // valid player behind it.
+          this.hub.send(
+            candidateId,
+            this.hub.event("ttt.matchmaking.left", { searching: false }),
+          );
+        }
+      }
+
+      if (!opponentId) return;
+      const currentJoiningSession = this.hub.session(userId);
+      const currentOpponentSession = this.hub.session(opponentId);
+      if (
+        !currentJoiningSession ||
+        currentJoiningSession.gameId !== null ||
+        currentJoiningSession.ludoGameId != null
+      ) {
+        if (
+          currentOpponentSession?.gameId === null &&
+          currentOpponentSession.ludoGameId == null
+        ) {
+          this.enqueueOnlineUser(opponentId, true);
+        }
+        throw new ConflictError("Realtime session changed while joining");
+      }
+      if (
+        !currentOpponentSession ||
+        currentOpponentSession.gameId !== null ||
+        currentOpponentSession.ludoGameId != null
+      ) {
+        this.enqueueOnlineUser(userId);
         this.hub.send(userId, this.hub.event("ttt.matchmaking.joined", { searching: true }));
         return;
       }
-      const candidateId = onlineQueue.splice(opponentIndex, 1)[0]!;
+
+      const first = Math.random() < 0.5 ? opponentId : userId;
+      const second = first === opponentId ? userId : opponentId;
+      const initial = initialState();
+      const state: OnlineGameState = {
+        ...initial,
+        xUserId: first,
+        oUserId: second,
+        currentTurnUserId: first,
+        winnerUserId: null,
+        version: 1,
+      };
+      let row: Awaited<ReturnType<PrismaClient["gameMatch"]["create"]>>;
       try {
-        await this.assertCanStart(candidateId);
-        opponentId = candidateId;
-        break;
-      } catch {
-        // Candidate can no longer start (daily limit / feature disabled) —
-        // tell them and keep scanning instead of failing this user's join.
-        this.hub.send(
-          candidateId,
-          this.hub.event("ttt.matchmaking.left", { searching: false }),
-        );
+        row = await this.prisma.gameMatch.create({
+          data: {
+            userId: first,
+            difficulty: "ONLINE",
+            hintsEnabled: false,
+            state: state as unknown as Prisma.InputJsonValue,
+          },
+        });
+      } catch (error) {
+        // Creation is the claim commit. Restore both still-connected players so
+        // a transient DB failure/retry cannot silently drop the opponent.
+        const opponentSession = this.hub.session(opponentId);
+        const userSession = this.hub.session(userId);
+        if (opponentSession?.gameId === null && opponentSession.ludoGameId == null) {
+          this.enqueueOnlineUser(opponentId, true);
+        }
+        if (userSession?.gameId === null && userSession.ludoGameId == null) {
+          this.enqueueOnlineUser(userId);
+        }
+        throw error;
       }
-    }
-    if (!opponentId) return; // unreachable; narrows the type
-    const first = Math.random() < 0.5 ? opponentId : userId;
-    const second = first === opponentId ? userId : opponentId;
-    const initial = initialState();
-    const state: OnlineGameState = {
-      ...initial,
-      xUserId: first,
-      oUserId: second,
-      currentTurnUserId: first,
-      winnerUserId: null,
-      version: 1,
-    };
-    const row = await this.prisma.gameMatch.create({
-      data: {
-        userId: first,
-        difficulty: "ONLINE",
-        hintsEnabled: false,
-        state: state as unknown as Prisma.InputJsonValue,
-      },
+
+      this.hub.setGame(first, row.id);
+      this.hub.setGame(second, row.id);
+      const snapshot = await this.onlineSnapshot(row.id);
+      this.sendOnlinePlayers(
+        state,
+        this.hub.event("ttt.match.found", { snapshot }, row.id, state.version),
+      );
     });
-    this.hub.setGame(first, row.id);
-    this.hub.setGame(second, row.id);
-    const snapshot = await this.onlineSnapshot(row.id);
-    this.sendOnlinePlayers(
-      state,
-      this.hub.event("ttt.match.found", { snapshot }, row.id, state.version),
-    );
   }
 
   async leaveOnlineMatchmaking(userId: string): Promise<void> {
-    let index = onlineQueue.indexOf(userId);
-    while (index >= 0) {
-      onlineQueue.splice(index, 1);
-      index = onlineQueue.indexOf(userId);
-    }
-    this.hub.send(userId, this.hub.event("ttt.matchmaking.left", { searching: false }));
+    let matchedDuringLeave: string | null = null;
+    await this.runOnlineMatchmakingExclusive(async () => {
+      this.removeOnlineQueueEntries(userId);
+      // A different socket may have claimed this user just before their cancel
+      // command acquired the pairing lock. Resolve that freshly-created match
+      // as a leave instead of emitting `left` while stranding the opponent.
+      const active = await this.activeOnlineMatch(userId);
+      if (active) matchedDuringLeave = active.id;
+      else this.hub.send(userId, this.hub.event("ttt.matchmaking.left", { searching: false }));
+    });
+    if (matchedDuringLeave) await this.leaveOnlineMatch(userId, matchedDuringLeave);
   }
 
   async disconnectOnline(userId: string): Promise<void> {
-    await this.leaveOnlineMatchmaking(userId);
+    await this.runOnlineMatchmakingExclusive(async () => {
+      // Socket close cleanup is fire-and-forget. A replacement socket may have
+      // authenticated and rejoined before this operation reaches the queue;
+      // never let the stale close remove that newer session's queue entry.
+      if (this.hub.session(userId)) return;
+      this.removeOnlineQueueEntries(userId);
+    });
   }
 
   async sendOnlineState(userId: string, matchId: string): Promise<void> {
-    const { state } = await this.onlineRowForMember(userId, matchId);
-    this.hub.setGame(userId, matchId);
+    const { row, state } = await this.onlineRowForMember(userId, matchId);
+    const session = this.hub.session(userId);
+    if (!session) throw new ConflictError("Realtime session is not connected");
+    if (
+      session.ludoGameId != null ||
+      (session.gameId !== null && session.gameId !== matchId)
+    ) {
+      throw new ConflictError(
+        "Finish your current realtime game before resuming Tic-tac-toe",
+      );
+    }
+    // A missed terminal broadcast must not leave the recovered socket pinned
+    // to a completed match and block its next matchmaking request.
+    this.hub.setGame(userId, row.status === "IN_PROGRESS" ? matchId : null);
     this.hub.send(
       userId,
       this.hub.event(
@@ -379,9 +527,7 @@ export class GameService {
   }
 
   async onlineMove(userId: string, matchId: string, cell: number): Promise<void> {
-    if (onlineInflight.has(matchId)) throw new ConflictError("A move is already being processed");
-    onlineInflight.add(matchId);
-    try {
+    await runOnlineMatchExclusive(matchId, async () => {
       const { row, state } = await this.onlineRowForMember(userId, matchId);
       if (row.status !== "IN_PROGRESS") throw new ConflictError("This match has finished");
       if (state.currentTurnUserId !== userId) throw new ConflictError("Wait for your turn");
@@ -425,41 +571,44 @@ export class GameService {
         this.hub.setGame(next.oUserId, null);
         onlineVoiceParticipants.delete(matchId);
       }
-    } finally {
-      onlineInflight.delete(matchId);
-    }
+    });
   }
 
   async leaveOnlineMatch(userId: string, matchId: string): Promise<void> {
-    const { row, state } = await this.onlineRowForMember(userId, matchId);
-    if (row.status !== "IN_PROGRESS") return;
-    const winnerUserId = state.xUserId === userId ? state.oUserId : state.xUserId;
-    const next: OnlineGameState = {
-      ...state,
-      winnerUserId,
-      currentTurnUserId: winnerUserId,
-      version: state.version + 1,
-    };
-    await this.prisma.gameMatch.update({
-      where: { id: matchId },
-      data: {
-        state: next as unknown as Prisma.InputJsonValue,
-        status: winnerUserId === state.xUserId ? "WON" : "LOST",
-      },
+    await runOnlineMatchExclusive(matchId, async () => {
+      const { row, state } = await this.onlineRowForMember(userId, matchId);
+      if (row.status !== "IN_PROGRESS") {
+        this.hub.setGame(userId, null);
+        return;
+      }
+      const winnerUserId = state.xUserId === userId ? state.oUserId : state.xUserId;
+      const next: OnlineGameState = {
+        ...state,
+        winnerUserId,
+        currentTurnUserId: winnerUserId,
+        version: state.version + 1,
+      };
+      await this.prisma.gameMatch.update({
+        where: { id: matchId },
+        data: {
+          state: next as unknown as Prisma.InputJsonValue,
+          status: winnerUserId === state.xUserId ? "WON" : "LOST",
+        },
+      });
+      const snapshot = await this.onlineSnapshot(matchId);
+      this.sendOnlinePlayers(
+        next,
+        this.hub.event(
+          "ttt.match.finished",
+          { snapshot, reason: "PLAYER_LEFT" },
+          matchId,
+          next.version,
+        ),
+      );
+      this.hub.setGame(state.xUserId, null);
+      this.hub.setGame(state.oUserId, null);
+      onlineVoiceParticipants.delete(matchId);
     });
-    const snapshot = await this.onlineSnapshot(matchId);
-    this.sendOnlinePlayers(
-      next,
-      this.hub.event(
-        "ttt.match.finished",
-        { snapshot, reason: "PLAYER_LEFT" },
-        matchId,
-        next.version,
-      ),
-    );
-    this.hub.setGame(state.xUserId, null);
-    this.hub.setGame(state.oUserId, null);
-    onlineVoiceParticipants.delete(matchId);
   }
 
   async sendOnlineChat(

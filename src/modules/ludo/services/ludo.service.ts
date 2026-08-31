@@ -389,17 +389,43 @@ export class LudoService {
     return rows[0].now;
   }
 
+  private activeOnlineTicTacToeWhere(userIds: readonly string[]): Prisma.GameMatchWhereInput {
+    return {
+      difficulty: "ONLINE",
+      status: "IN_PROGRESS",
+      OR: userIds.flatMap((userId) => [
+        { userId },
+        { state: { path: ["oUserId"], equals: userId } },
+      ]),
+    };
+  }
+
   async joinMatchmaking(
     userId: string,
     input: { mode: LudoMode; region?: string; pingMs?: number },
   ): Promise<LudoServerEvent> {
     const config = await this.assertAvailable(input.mode);
     await this.assertSocketUser(userId);
+    const realtimeSession = this.hub.session(userId);
+    if (!realtimeSession) throw new ConflictError("Realtime session is not connected");
+    if (realtimeSession.gameId !== null) {
+      throw new ConflictError("Finish your active Tic-tac-toe match before joining Ludo");
+    }
     const entry = await this.prisma.$transaction(async (tx) => {
       await this.lock(tx, `ludo:user:${userId}`);
+      if (this.hub.session(userId)?.gameId !== null) {
+        throw new ConflictError("Finish your active Tic-tac-toe match before joining Ludo");
+      }
       const now = await this.dbNow(tx);
       const activePlayer = await tx.ludoPlayer.findFirst({ where: { activeKey: userId } });
       if (activePlayer) throw new ConflictError("You are already in an active Ludo match");
+      const activeTicTacToe = await tx.gameMatch.findFirst({
+        where: this.activeOnlineTicTacToeWhere([userId]),
+        select: { id: true },
+      });
+      if (activeTicTacToe) {
+        throw new ConflictError("Finish your active Tic-tac-toe match before joining Ludo");
+      }
       const existing = await tx.ludoQueueEntry.findUnique({ where: { userId } });
       if (
         existing?.status === "QUEUED" &&
@@ -459,7 +485,9 @@ export class LudoService {
     mode: LudoGameMode,
     config: LudoRuntimeConfig,
   ): Promise<MatchCreation | null> {
-    const online = this.hub.onlineUserIds();
+    const online = this.hub
+      .onlineUserIds()
+      .filter((userId) => this.hub.session(userId)?.gameId === null);
     if (online.length < roomPlayerCount(mode)) return null;
     return this.prisma.$transaction(
       async (tx) => {
@@ -492,10 +520,18 @@ export class LudoService {
         ) {
           return null;
         }
+        if (candidates.some((candidate) => this.hub.session(candidate.userId)?.gameId !== null)) {
+          return null;
+        }
         const activeCount = await tx.ludoPlayer.count({
           where: { activeKey: { in: candidates.map((candidate) => candidate.userId) } },
         });
         if (activeCount > 0) return null;
+        const activeTicTacToe = await tx.gameMatch.findFirst({
+          where: this.activeOnlineTicTacToeWhere(candidates.map((candidate) => candidate.userId)),
+          select: { id: true },
+        });
+        if (activeTicTacToe) return null;
 
         const roomId = randomUUID();
         const engine = createInitialState({
@@ -558,7 +594,7 @@ export class LudoService {
 
   private publishMatchFound(match: MatchCreation): void {
     for (const player of match.players) {
-      this.hub.setGame(player.userId, match.roomId);
+      this.hub.setLudoGame(player.userId, match.roomId);
       this.hub.send(
         player.userId,
         this.hub.event(
@@ -580,11 +616,6 @@ export class LudoService {
     const config = await this.assertAvailable();
     const result = await this.prisma.$transaction(async (tx) => {
       await this.lock(tx, `ludo:room:${gameId}`, 20260804);
-      const duplicate = await tx.ludoAction.findUnique({
-        where: { roomId_actionId: { roomId: gameId, actionId } },
-      });
-      if (duplicate)
-        return { event: duplicate.serverEvent as unknown as LudoServerEvent, userIds: [] };
       const room = await tx.ludoRoom.findUnique({
         where: { id: gameId },
         include: { players: true },
@@ -592,13 +623,22 @@ export class LudoService {
       if (!room || !room.players.some((player) => player.userId === userId)) {
         throw new NotFoundError("Ludo room not found");
       }
+      const duplicate = await tx.ludoAction.findUnique({
+        where: { roomId_actionId: { roomId: gameId, actionId } },
+      });
+      if (duplicate && duplicate.userId !== userId) {
+        throw new ConflictError("This action ID was already used by another player");
+      }
+      if (duplicate)
+        return { event: duplicate.serverEvent as unknown as LudoServerEvent, userIds: [userId] };
       const player = room.players.find((candidate) => candidate.userId === userId)!;
       if (player.status !== "MATCHED") {
         const prior = await tx.ludoAction.findFirst({
           where: { roomId: gameId, userId, type: "match.accept" },
           orderBy: { createdAt: "desc" },
         });
-        if (prior) return { event: prior.serverEvent as unknown as LudoServerEvent, userIds: [] };
+        if (prior)
+          return { event: prior.serverEvent as unknown as LudoServerEvent, userIds: [userId] };
       }
       // Acceptance is a per-player handshake, not a board mutation. Clients
       // may accept concurrently from the same match-found version.
@@ -668,11 +708,6 @@ export class LudoService {
     const config = await this.assertAvailable();
     const result = await this.prisma.$transaction(async (tx) => {
       await this.lock(tx, `ludo:room:${gameId}`, 20260804);
-      const duplicate = await tx.ludoAction.findUnique({
-        where: { roomId_actionId: { roomId: gameId, actionId } },
-      });
-      if (duplicate)
-        return { event: duplicate.serverEvent as unknown as LudoServerEvent, userIds: [] };
       const room = await tx.ludoRoom.findUnique({
         where: { id: gameId },
         include: { players: true },
@@ -680,13 +715,22 @@ export class LudoService {
       if (!room || !room.players.some((player) => player.userId === userId)) {
         throw new NotFoundError("Ludo room not found");
       }
+      const duplicate = await tx.ludoAction.findUnique({
+        where: { roomId_actionId: { roomId: gameId, actionId } },
+      });
+      if (duplicate && duplicate.userId !== userId) {
+        throw new ConflictError("This action ID was already used by another player");
+      }
+      if (duplicate)
+        return { event: duplicate.serverEvent as unknown as LudoServerEvent, userIds: [userId] };
       const player = room.players.find((candidate) => candidate.userId === userId)!;
       if (player.status !== "ACCEPTED") {
         const prior = await tx.ludoAction.findFirst({
           where: { roomId: gameId, userId, type: "room.ready" },
           orderBy: { createdAt: "desc" },
         });
-        if (prior) return { event: prior.serverEvent as unknown as LudoServerEvent, userIds: [] };
+        if (prior)
+          return { event: prior.serverEvent as unknown as LudoServerEvent, userIds: [userId] };
       }
       // Ready is likewise per-player and safe to serialize without rejecting
       // peers that pressed Ready from the same room-created version.
@@ -772,6 +816,27 @@ export class LudoService {
     });
   }
 
+  private ruleError(error: unknown, operation: "ROLL" | "MOVE"): AppError {
+    const message = error instanceof Error ? error.message : "Invalid Ludo action";
+    if (message === "It is not this player's turn") {
+      return new AppError(message, 409, "NOT_YOUR_TURN");
+    }
+    if (message === "The game is not waiting for a dice roll") {
+      return new AppError(message, 409, "ROLL_NOT_ALLOWED");
+    }
+    if (message === "The game is not waiting for a pawn move") {
+      return new AppError(message, 409, "ROLL_REQUIRED");
+    }
+    if (message === "Pawn is not legal for this roll") {
+      return new AppError(message, 400, "ILLEGAL_MOVE");
+    }
+    return new AppError(
+      operation === "ROLL" ? "The dice cannot be rolled now" : "That pawn cannot move now",
+      400,
+      operation === "ROLL" ? "ROLL_NOT_ALLOWED" : "ILLEGAL_MOVE",
+    );
+  }
+
   async getActive(userId: string): Promise<Record<string, unknown> | null> {
     const player = await this.prisma.ludoPlayer.findFirst({
       where: { activeKey: userId },
@@ -852,7 +917,7 @@ export class LudoService {
     )?.userId;
     const isConnectedToRoom = (userId: string): boolean => {
       const session = this.hub.session(userId);
-      return session?.gameId === room.id;
+      return session?.ludoGameId === room.id;
     };
     return {
       gameId: room.id,
@@ -868,31 +933,37 @@ export class LudoService {
       legalPawnIds: state.legalPawnIds,
       players: room.players
         .sort((a, b) => a.seat - b.seat)
-        .map((player) => ({
-          userId: player.userId,
-          displayName: player.user.name,
-          avatarUrl: player.user.avatarUrl,
-          color: player.color,
-          seat: player.seat,
-          pawns: (byUser.get(player.userId)?.pawns ?? []).map((progress, index) => ({
-            index,
-            progress,
-          })),
-          status: player.status,
-          connected:
-            (player.status === "ACTIVE" || player.status === "READY") &&
-            isConnectedToRoom(player.userId),
-          connectionState:
-            player.status === "FORFEITED" || player.status === "FINISHED"
-              ? player.status
-              : isConnectedToRoom(player.userId)
-                ? "CONNECTED"
-                : player.status === "DISCONNECTED"
-                  ? "RECONNECTING"
-                  : "DISCONNECTED",
-          plan: this.effectivePlan(player.user.ludoEntitlement),
-          finishedPosition: byUser.get(player.userId)?.finishedPosition ?? player.finishedPosition,
-        })),
+        .map((player) => {
+          const connected =
+            player.status !== "FORFEITED" &&
+            player.status !== "FINISHED" &&
+            isConnectedToRoom(player.userId);
+          return {
+            userId: player.userId,
+            displayName: player.user.name,
+            avatarUrl: player.user.avatarUrl,
+            color: player.color,
+            seat: player.seat,
+            pawns: (byUser.get(player.userId)?.pawns ?? []).map((progress, index) => ({
+              index,
+              progress,
+            })),
+            status: player.status,
+            connected,
+            online: connected,
+            connectionState:
+              player.status === "FORFEITED" || player.status === "FINISHED"
+                ? player.status
+                : connected
+                  ? "CONNECTED"
+                  : player.status === "DISCONNECTED"
+                    ? "RECONNECTING"
+                    : "DISCONNECTED",
+            plan: this.effectivePlan(player.user.ludoEntitlement),
+            finishedPosition:
+              byUser.get(player.userId)?.finishedPosition ?? player.finishedPosition,
+          };
+        }),
       finishOrder: state.finishOrder,
       config: state.config,
       chat: [...room.chatMessages].reverse().map((message) => ({
@@ -995,17 +1066,30 @@ export class LudoService {
       });
       if (!player) return null;
       if (resumeToken && hashToken(resumeToken) !== player.resumeTokenHash) {
-        throw new ForbiddenError("Invalid resume token");
+        throw new AppError("The Ludo resume credential is stale", 401, "INVALID_RESUME_TOKEN");
       }
       const rotated = generateOpaqueToken();
+      const restoredStatus =
+        player.status === "DISCONNECTED"
+          ? player.room.status === "ACTIVE"
+            ? "ACTIVE"
+            : player.readyAt
+              ? "READY"
+              : player.acceptedAt
+                ? "ACCEPTED"
+                : "MATCHED"
+          : player.status;
       const changed = await tx.ludoPlayer.updateMany({
         where: { id: player.id, resumeTokenHash: player.resumeTokenHash },
         data: {
           resumeTokenHash: hashToken(rotated),
-          lastAcknowledgedVersion: Math.min(lastAcknowledgedStateVersion, player.room.stateVersion),
+          lastAcknowledgedVersion: Math.max(
+            player.lastAcknowledgedVersion,
+            Math.min(lastAcknowledgedStateVersion, player.room.stateVersion),
+          ),
           ...(player.status === "DISCONNECTED"
             ? {
-                status: player.room.status === "ACTIVE" ? "ACTIVE" : "READY",
+                status: restoredStatus,
                 disconnectedAt: null,
                 reconnectDeadline: null,
               }
@@ -1014,23 +1098,48 @@ export class LudoService {
       });
       if (changed.count !== 1)
         throw new ConflictError("Resume credential changed; reconnect again");
-      return { player, rotated };
+      return { player, playerStatus: restoredStatus, rotated };
     });
     if (!resumed) return null;
-    const { player, rotated } = resumed;
-    this.hub.setGame(userId, player.roomId);
+    const { player, playerStatus, rotated } = resumed;
+    this.hub.setLudoGame(userId, player.roomId);
 
     // A full authoritative snapshot is deliberately used on reconnect. It is
     // bounded (four players + 50 chat messages) and restores every UI facet in
     // one event, while the append-only action log remains available for replay
     // tooling and future patch-based clients.
-    const event = this.hub.event(
-      "game.state",
-      { snapshot: await this.getSnapshot(userId, player.roomId) },
-      player.roomId,
-      player.room.stateVersion,
-    );
-    this.hub.broadcastRoom(
+    const snapshot = await this.getSnapshot(userId, player.roomId);
+    const recovery = {
+      snapshot,
+      recovery: true,
+      pregamePhase: player.room.status,
+      playerHandshakeStatus: playerStatus,
+    };
+    const event =
+      player.room.status === "MATCHED" && playerStatus === "MATCHED"
+        ? this.hub.event(
+            "match.found",
+            { ...recovery, gameId: player.roomId, resumeToken: rotated },
+            player.roomId,
+            player.room.stateVersion,
+          )
+        : player.room.status === "WAITING_READY" && playerStatus === "ACCEPTED"
+          ? this.hub.event("room.created", recovery, player.roomId, player.room.stateVersion)
+          : player.room.status === "MATCHED" || player.room.status === "WAITING_READY"
+            ? this.hub.event(
+                "room.player_joined",
+                {
+                  ...recovery,
+                  userId,
+                  accepted: playerStatus === "ACCEPTED" || playerStatus === "READY",
+                  ready: playerStatus === "READY",
+                  allAccepted: player.room.status === "WAITING_READY",
+                },
+                player.roomId,
+                player.room.stateVersion,
+              )
+            : this.hub.event("game.state", recovery, player.roomId, player.room.stateVersion);
+    this.hub.broadcastLudoRoom(
       player.roomId,
       this.hub.event(
         "room.player_reconnected",
@@ -1156,9 +1265,7 @@ export class LudoService {
         try {
           outcome = applyRoll(state, userId, dice, now.toISOString());
         } catch (error) {
-          throw new BadRequestError(
-            error instanceof Error ? error.message : "Invalid dice request",
-          );
+          throw this.ruleError(error, "ROLL");
         }
         const currentTurnUserId = outcome.state.players.find(
           (player) => player.seat === outcome.state.currentTurnSeat,
@@ -1203,7 +1310,7 @@ export class LudoService {
         try {
           outcome = applyMove(state, userId, pawnIndex, now.toISOString());
         } catch (error) {
-          throw new BadRequestError(error instanceof Error ? error.message : "Invalid pawn move");
+          throw this.ruleError(error, "MOVE");
         }
         const currentTurnUserId = outcome.state.players.find(
           (player) => player.seat === outcome.state.currentTurnSeat,
@@ -1270,27 +1377,26 @@ export class LudoService {
     const result: RoomMutationResult = await this.prisma.$transaction(
       async (tx) => {
         await this.lock(tx, `ludo:room:${params.gameId}`, 20260804);
-        const duplicate = await tx.ludoAction.findUnique({
-          where: { roomId_actionId: { roomId: params.gameId, actionId: params.actionId } },
-        });
-        if (duplicate) {
-          const userIds = await tx.ludoPlayer.findMany({
-            where: { roomId: params.gameId },
-            select: { userId: true },
-          });
-          return {
-            event: duplicate.serverEvent as unknown as LudoServerEvent,
-            userIds: userIds.map((player) => player.userId),
-            completed: false,
-            clearedUserIds: [],
-          };
-        }
         const room = await tx.ludoRoom.findUnique({
           where: { id: params.gameId },
           include: { players: true },
         });
         if (!room || !room.players.some((player) => player.userId === params.userId)) {
           throw new NotFoundError("Ludo room not found");
+        }
+        const duplicate = await tx.ludoAction.findUnique({
+          where: { roomId_actionId: { roomId: params.gameId, actionId: params.actionId } },
+        });
+        if (duplicate) {
+          if (duplicate.userId !== params.userId) {
+            throw new ConflictError("This action ID was already used by another player");
+          }
+          return {
+            event: duplicate.serverEvent as unknown as LudoServerEvent,
+            userIds: room.players.map((player) => player.userId),
+            completed: false,
+            clearedUserIds: [],
+          };
         }
         if (room.status !== "ACTIVE") throw new ConflictError("This Ludo match is not active");
         if (room.stateVersion !== params.expectedStateVersion)
@@ -1397,6 +1503,10 @@ export class LudoService {
           (player) => player.seat === mutation.state.currentTurnSeat,
         );
         const snapshot = this.compactSnapshot(room, mutation.state, nextVersion, nextTurnDeadline);
+        const confirmedDice =
+          mutation.eventType === "dice.rolled" && typeof mutation.payload.dice === "number"
+            ? mutation.payload.dice
+            : mutation.state.dice;
         const event = this.hub.event(
           mutation.eventType,
           {
@@ -1405,9 +1515,15 @@ export class LudoService {
             status: completed ? "COMPLETED" : "ACTIVE",
             currentTurnUserId: currentTurn?.userId ?? null,
             currentTurnSeat: mutation.state.currentTurnSeat,
+            currentSeat: mutation.state.currentTurnSeat,
             turnDeadlineAt: nextTurnDeadline?.toISOString() ?? null,
-            dice: mutation.state.dice,
+            turnDeadline: nextTurnDeadline?.toISOString() ?? null,
+            dice: confirmedDice,
+            ...(mutation.eventType === "dice.rolled"
+              ? { diceValue: confirmedDice, stateDice: mutation.state.dice }
+              : {}),
             legalPawnIds: mutation.state.legalPawnIds,
+            legalPawnIndices: mutation.state.legalPawnIds,
             finishOrder: mutation.state.finishOrder,
             snapshot,
           },
@@ -1438,7 +1554,7 @@ export class LudoService {
     for (const userId of result.userIds) {
       this.hub.send(userId, result.event);
       if (result.completed || result.clearedUserIds.includes(userId))
-        this.hub.setGame(userId, null);
+        this.hub.setLudoGame(userId, null);
     }
     if (result.completed) {
       const winnerId = (result.event.payload as { finishOrder?: string[] }).finishOrder?.[0];
@@ -1555,43 +1671,74 @@ export class LudoService {
   }
 
   async markDisconnected(userId: string): Promise<void> {
-    await this.leaveMatchmaking(userId).catch(() => undefined);
-    const player = await this.prisma.ludoPlayer.findFirst({
-      where: { activeKey: userId },
-      include: { room: true },
-    });
-    if (!player) return;
-    if (player.room.status !== "ACTIVE") {
-      await this.cancelPreGameRoom(player.roomId, "PLAYER_DISCONNECTED");
-      return;
-    }
-    const config = await this.runtimeConfig();
-    const now = new Date();
-    const changed = await this.prisma.ludoPlayer.updateMany({
-      where: { id: player.id, status: "ACTIVE" },
-      data: {
-        status: "DISCONNECTED",
-        disconnectedAt: now,
-        reconnectDeadline: new Date(now.getTime() + config.reconnectionGraceSeconds * 1000),
-        disconnectCount: { increment: 1 },
-      },
-    });
-    if (changed.count > 0) {
-      this.hub.broadcastRoom(
-        player.roomId,
-        this.hub.event(
-          "room.player_disconnected",
-          {
-            userId,
-            reconnectDeadline: new Date(
-              now.getTime() + config.reconnectionGraceSeconds * 1000,
-            ).toISOString(),
-          },
-          player.roomId,
-          player.room.stateVersion,
-        ),
+    // Replacement sockets register before their predecessor's close callback
+    // runs. The fast-path plus the same advisory locks used by queue/resume
+    // mutations prevent that late callback from cancelling the replacement's
+    // queue entry or writing a successfully resumed player back offline.
+    if (this.hub.session(userId)) return;
+    const reconnectionGraceSeconds = await this.settings.getNumber(
+      "game.ludo.reconnectionGraceSeconds",
+    );
+    const result = await this.prisma.$transaction(async (tx) => {
+      await this.lock(tx, `ludo:user:${userId}`);
+      await this.lock(tx, `ludo:user:${userId}`, 20260805);
+      if (this.hub.session(userId)) return null;
+
+      await tx.ludoQueueEntry.updateMany({
+        where: { userId, status: "QUEUED" },
+        data: { status: "CANCELLED" },
+      });
+      const player = await tx.ludoPlayer.findFirst({
+        where: { activeKey: userId },
+        include: { room: true },
+      });
+      if (!player) return null;
+
+      if (player.room.status !== "ACTIVE") {
+        return {
+          kind: "PREGAME" as const,
+          roomId: player.roomId,
+          stateVersion: player.room.stateVersion,
+          reconnectDeadline: player.room.acceptanceDeadline,
+        };
+      }
+
+      const now = await this.dbNow(tx);
+      const reconnectDeadline = new Date(
+        now.getTime() + Math.max(1, reconnectionGraceSeconds) * 1000,
       );
-    }
+      const changed = await tx.ludoPlayer.updateMany({
+        where: { id: player.id, status: "ACTIVE" },
+        data: {
+          status: "DISCONNECTED",
+          disconnectedAt: now,
+          reconnectDeadline,
+          disconnectCount: { increment: 1 },
+        },
+      });
+      return changed.count === 1
+        ? {
+            kind: "ACTIVE" as const,
+            roomId: player.roomId,
+            stateVersion: player.room.stateVersion,
+            reconnectDeadline,
+          }
+        : null;
+    });
+    if (!result || this.hub.session(userId)) return;
+    this.hub.broadcastLudoRoom(
+      result.roomId,
+      this.hub.event(
+        "room.player_disconnected",
+        {
+          userId,
+          pregame: result.kind === "PREGAME",
+          reconnectDeadline: result.reconnectDeadline?.toISOString() ?? null,
+        },
+        result.roomId,
+        result.stateVersion,
+      ),
+    );
   }
 
   private async assertRoomMember(userId: string, gameId: string): Promise<void> {
@@ -1681,10 +1828,13 @@ export class LudoService {
     actionId: string,
     message: string,
   ): Promise<LudoServerEvent> {
-    const prior = await this.existingChatEvent(userId, gameId, actionId);
-    if (prior) return prior;
-    const config = await this.runtimeConfig();
     await this.assertRoomMember(userId, gameId);
+    const prior = await this.existingChatEvent(userId, gameId, actionId);
+    if (prior) {
+      this.hub.send(userId, prior);
+      return prior;
+    }
+    const config = await this.runtimeConfig();
     await this.assertNotRestricted(userId, "COMMUNICATION");
     const code = message.trim().toUpperCase();
     if (![...config.quickMessages, ...config.freeReactions].includes(code)) {
@@ -1710,10 +1860,10 @@ export class LudoService {
     const room = await this.prisma.ludoRoom.findUniqueOrThrow({ where: { id: gameId } });
     const event = this.chatEvent(row, "chat.quick.received", gameId, room.stateVersion);
     if (created) {
-      this.hub.broadcastRoom(gameId, event, {
+      this.hub.broadcastLudoRoom(gameId, event, {
         excludeUserIds: await this.chatExclusions(gameId, userId),
       });
-    }
+    } else this.hub.send(userId, event);
     return event;
   }
 
@@ -1723,8 +1873,12 @@ export class LudoService {
     actionId: string,
     input: string,
   ): Promise<LudoServerEvent> {
+    await this.assertRoomMember(userId, gameId);
     const prior = await this.existingChatEvent(userId, gameId, actionId);
-    if (prior) return prior;
+    if (prior) {
+      this.hub.send(userId, prior);
+      return prior;
+    }
     const [config, entitlement] = await Promise.all([
       this.runtimeConfig(),
       this.effectiveEntitlement(userId),
@@ -1732,7 +1886,6 @@ export class LudoService {
     if (!config.textChatEnabled) throw new ForbiddenError("Text chat is disabled");
     if (!entitlement.entitlements.textChat)
       throw new ForbiddenError("Ludo Plus or Pro is required");
-    await this.assertRoomMember(userId, gameId);
     await this.assertNotRestricted(userId, "COMMUNICATION");
     await this.assertNotRestricted(userId, "TEXT_CHAT");
     await this.enforceChatRate(userId, gameId, config.chatRateLimitPer10Seconds);
@@ -1770,10 +1923,10 @@ export class LudoService {
     const room = await this.prisma.ludoRoom.findUniqueOrThrow({ where: { id: gameId } });
     const event = this.chatEvent(row, "chat.text.received", gameId, room.stateVersion);
     if (created) {
-      this.hub.broadcastRoom(gameId, event, {
+      this.hub.broadcastLudoRoom(gameId, event, {
         excludeUserIds: await this.chatExclusions(gameId, userId),
       });
-    }
+    } else this.hub.send(userId, event);
     return event;
   }
 
@@ -1812,7 +1965,7 @@ export class LudoService {
       const oldestKey = this.typingActivity.keys().next().value as string | undefined;
       if (oldestKey) this.typingActivity.delete(oldestKey);
     }
-    this.hub.broadcastRoom(
+    this.hub.broadcastLudoRoom(
       gameId,
       this.hub.event("chat.typing", { userId, typing }, gameId, null),
       { excludeUserIds: [userId] },
@@ -1860,7 +2013,7 @@ export class LudoService {
       gameId,
       room.stateVersion,
     );
-    this.hub.broadcastRoom(gameId, event);
+    this.hub.broadcastLudoRoom(gameId, event);
     return event;
   }
 
@@ -1893,7 +2046,7 @@ export class LudoService {
       gameId,
       room.stateVersion,
     );
-    this.hub.broadcastRoom(gameId, event);
+    this.hub.broadcastLudoRoom(gameId, event);
     return event;
   }
 
@@ -2052,7 +2205,7 @@ export class LudoService {
     });
     if (!result) return;
     for (const player of result) {
-      this.hub.setGame(player.userId, null);
+      this.hub.setLudoGame(player.userId, null);
       this.hub.send(
         player.userId,
         this.hub.event(
