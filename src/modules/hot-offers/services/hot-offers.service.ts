@@ -86,7 +86,23 @@ export class HotOffersService {
 
   async listPublicOffers(
     query: ListOffersQuery,
+    userId?: string,
   ): Promise<{ items: OfferCardDto[]; meta: PageMeta }> {
+    if (userId) {
+      // Personalized: offers the user completed are hidden or flagged per the
+      // admin's completedBehavior. Never served from (or stored in) the shared
+      // public cache.
+      const completedIds = await this.repo.approvedOfferIds(userId);
+      const [offers, total] = await this.repo.listOffers(query, {
+        publishedOnly: true,
+        hideCompletedFor: completedIds,
+      });
+      return {
+        items: offers.map((offer) => toOfferCardDto(offer, completedIds.has(offer.id))),
+        meta: buildMeta(query, total),
+      };
+    }
+
     const key = `offers:${JSON.stringify([
       query.page,
       query.limit,
@@ -97,11 +113,19 @@ export class HotOffersService {
     ])}`;
     return this.cachedPublic(key, async () => {
       const [offers, total] = await this.repo.listOffers(query, { publishedOnly: true });
-      return { items: offers.map(toOfferCardDto), meta: buildMeta(query, total) };
+      return { items: offers.map((offer) => toOfferCardDto(offer)), meta: buildMeta(query, total) };
     });
   }
 
-  async getPublicOffer(slug: string): Promise<OfferDetailsDto> {
+  async getPublicOffer(slug: string, userId?: string): Promise<OfferDetailsDto> {
+    if (userId) {
+      // Detail stays reachable even for HIDE offers (submission history links
+      // to it) — only the lists drop them.
+      const offer = await this.repo.findOfferBySlug(slug, true);
+      if (!offer) throw new NotFoundError("Offer not found");
+      const completed = await this.repo.hasApprovedSubmission(userId, offer.id);
+      return toOfferDetailsDto(offer, completed);
+    }
     return this.cachedPublic(`offer:${slug}`, async () => {
       const offer = await this.repo.findOfferBySlug(slug, true);
       if (!offer) throw new NotFoundError("Offer not found");
@@ -211,7 +235,7 @@ export class HotOffersService {
     query: AdminListOffersQuery,
   ): Promise<{ items: OfferCardDto[]; meta: PageMeta }> {
     const [offers, total] = await this.repo.listOffers(query, { publishedOnly: false });
-    return { items: offers.map(toOfferCardDto), meta: buildMeta(query, total) };
+    return { items: offers.map((offer) => toOfferCardDto(offer)), meta: buildMeta(query, total) };
   }
 
   async adminGetOffer(id: string): Promise<OfferDetailsDto> {
@@ -364,6 +388,7 @@ export class HotOffersService {
       maxUsers: input.maxUsers ?? null,
       maxRewards: input.maxRewards ?? null,
       dailyLimit: input.dailyLimit ?? null,
+      completedBehavior: input.completedBehavior,
       priority: input.priority,
       status: input.status,
     };

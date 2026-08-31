@@ -59,6 +59,13 @@ enum ContentStatus {
   ARCHIVED
 }
 
+/// Admin-chosen rendering of an offer for users who completed it (APPROVED).
+enum CompletedBehavior {
+  SHOW
+  HIDE
+  SHOW_COMPLETED
+}
+
 enum OfferEventType {
   VIEW
   CLICK
@@ -568,6 +575,10 @@ model Offer {
   maxUsers         Int? // cap on distinct participants — enforced at submission (Module 4)
   maxRewards       Int? // cap on approved rewards — enforced at approval (Module 4)
   dailyLimit       Int? // per-user submissions per day — enforced at submission (Module 4)
+  // How the offer renders for a user whose submission was APPROVED:
+  // SHOW = unchanged, HIDE = removed from their lists, SHOW_COMPLETED = card
+  // shows a disabled "Completed" button.
+  completedBehavior CompletedBehavior @default(SHOW)
   priority         Int             @default(0)
   status           ContentStatus   @default(DRAFT)
   createdAt        DateTime        @default(now())

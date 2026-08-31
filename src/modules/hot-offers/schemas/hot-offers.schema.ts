@@ -132,6 +132,9 @@ export type UpsertFeedbackPageInput = z.infer<typeof upsertFeedbackPageSchema>;
 
 const difficultySchema = z.enum(["EASY", "MEDIUM", "HARD"]);
 
+/** What a user who completed the offer (APPROVED submission) sees. */
+const completedBehaviorSchema = z.enum(["SHOW", "HIDE", "SHOW_COMPLETED"]);
+
 export const offerCardSchema = z.object({
   id: z.string().uuid(),
   slug: z.string(),
@@ -153,6 +156,9 @@ export const offerCardSchema = z.object({
   expiresAt: z.string().datetime().nullable(),
   priority: z.number().int(),
   status: contentStatusSchema,
+  completedBehavior: completedBehaviorSchema,
+  /** True when the requesting user's submission for this offer is APPROVED. */
+  completed: z.boolean(),
   category: z.object({ id: z.string().uuid(), slug: z.string(), title: z.string() }),
   createdAt: z.string().datetime(),
 });
@@ -178,7 +184,7 @@ export type OfferWithCategory = Offer & {
   category: { id: string; slug: string; title: string };
 };
 
-export const toOfferCardDto = (offer: OfferWithCategory): OfferCardDto => ({
+export const toOfferCardDto = (offer: OfferWithCategory, completed = false): OfferCardDto => ({
   id: offer.id,
   slug: offer.slug,
   title: offer.title,
@@ -199,6 +205,8 @@ export const toOfferCardDto = (offer: OfferWithCategory): OfferCardDto => ({
   expiresAt: offer.expiresAt?.toISOString() ?? null,
   priority: offer.priority,
   status: offer.status,
+  completedBehavior: offer.completedBehavior,
+  completed,
   category: {
     id: offer.category.id,
     slug: offer.category.slug,
@@ -207,8 +215,11 @@ export const toOfferCardDto = (offer: OfferWithCategory): OfferCardDto => ({
   createdAt: offer.createdAt.toISOString(),
 });
 
-export const toOfferDetailsDto = (offer: OfferWithCategory): OfferDetailsDto => ({
-  ...toOfferCardDto(offer),
+export const toOfferDetailsDto = (
+  offer: OfferWithCategory,
+  completed = false,
+): OfferDetailsDto => ({
+  ...toOfferCardDto(offer, completed),
   bannerUrl: offer.bannerUrl,
   description: offer.description,
   taskDescription: offer.taskDescription,
@@ -274,6 +285,7 @@ export const upsertOfferSchema = z.object({
   maxUsers: z.number().int().min(1).optional().nullable(),
   maxRewards: z.number().int().min(1).optional().nullable(),
   dailyLimit: z.number().int().min(1).optional().nullable(),
+  completedBehavior: completedBehaviorSchema.default("SHOW"),
   priority: z.number().int().min(0).max(10_000).default(0),
   status: contentStatusSchema.default("DRAFT"),
 });
