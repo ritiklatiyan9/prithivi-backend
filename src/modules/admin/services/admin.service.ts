@@ -101,7 +101,9 @@ export class AdminService {
     });
 
     // Credited points live in the referrer's ledger under "referral:<referredUserId>".
-    const txs = await this.wallets.findByReferences(referred.map((u) => `referral:${u.id}`));
+    const txs = await this.wallets.findByReferences(
+      referred.flatMap((u) => [`referral:${u.id}`, `referral-join:${u.id}`]),
+    );
     const pointsByRef = new Map(txs.map((t) => [t.reference, t.amount.toNumber()]));
 
     const items: AdminReferralRow[] = referred.map((u) => ({
@@ -120,6 +122,7 @@ export class AdminService {
           }
         : null,
       creditedPoints: pointsByRef.get(`referral:${u.id}`) ?? null,
+      inviteeCreditedPoints: pointsByRef.get(`referral-join:${u.id}`) ?? 0,
     }));
 
     return { items, meta: buildMeta(pagination, total) };

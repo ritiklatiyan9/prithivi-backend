@@ -66,6 +66,7 @@ export const usersRoutes = async (app: FastifyInstance): Promise<void> => {
   app.post<{ Body: ApplyReferralInput }>(
     "/me/referral",
     {
+      config: { rateLimit: { max: 10, timeWindow: "1 minute" } },
       preHandler: [authGuard],
       schema: {
         tags: ["users"],

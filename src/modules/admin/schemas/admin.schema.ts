@@ -37,6 +37,7 @@ export interface AdminReferralRow {
   referred: { id: string; name: string; email: string; referredAt: string | null };
   referrer: { id: string; name: string; email: string; referralCode: string | null } | null;
   creditedPoints: number | null;
+  inviteeCreditedPoints: number;
 }
 
 export const userIdParamsSchema = z.object({

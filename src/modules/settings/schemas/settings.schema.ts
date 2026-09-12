@@ -249,12 +249,34 @@ export const SETTINGS_REGISTRY: readonly SettingDefinition[] = [
   },
   // --- Referrals ---
   {
+    key: "referral.enabled",
+    type: "BOOLEAN",
+    category: "Referrals",
+    label: "Accept referral codes",
+    description: "Allow new referral claims. Pausing does not reverse rewards already credited.",
+    default: "true",
+  },
+  {
     key: "referral.rewardPoints",
     type: "NUMBER",
     category: "Referrals",
-    label: "Referral reward points",
-    description: "Points credited to the referrer when an invited user applies their code",
+    label: "Inviter reward (coins)",
+    description:
+      "Coins credited to the code owner when a friend applies their code. Changes affect future claims only.",
     default: "50",
+    integer: true,
+    min: 0,
+    max: 1_000_000,
+  },
+  {
+    key: "referral.inviteeRewardPoints",
+    type: "NUMBER",
+    category: "Referrals",
+    label: "Joining friend reward (coins)",
+    description:
+      "Coins credited to the person applying a code. Set 0 for no joining reward; existing claims are unchanged.",
+    default: "0",
+    integer: true,
     min: 0,
     max: 1_000_000,
   },

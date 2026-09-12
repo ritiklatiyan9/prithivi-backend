@@ -70,11 +70,13 @@ export class UsersRepository {
           data: {
             firebaseUid: profile.firebaseUid,
             avatarUrl: profile.avatarUrl ?? existing.avatarUrl,
-            ...(existing.referralCode ? {} : { referralCode: generateReferralCode() }),
           },
         });
         // A pre-created row (e.g. email-invited) that never signed in counts as new.
-        return { user, isNewUser: existing.firebaseUid === null };
+        return {
+          user: await this.ensureReferralCode(user),
+          isNewUser: existing.firebaseUid === null,
+        };
       } catch (error) {
         if (!isReferralCodeCollision(error)) throw error;
       }
@@ -87,10 +89,13 @@ export class UsersRepository {
     if (user.referralCode) return user;
     for (;;) {
       try {
-        return await this.prisma.user.update({
-          where: { id: user.id },
+        await this.prisma.user.updateMany({
+          where: { id: user.id, referralCode: null },
           data: { referralCode: generateReferralCode() },
         });
+        // A simultaneous request may have won. Return the stored code rather
+        // than replacing a code another user has already copied or shared.
+        return await this.prisma.user.findUniqueOrThrow({ where: { id: user.id } });
       } catch (error) {
         if (!isReferralCodeCollision(error)) throw error;
       }
@@ -101,10 +106,7 @@ export class UsersRepository {
    * Top earners since `since`: sums wallet CREDITs per user (refund credits
    * excluded — a refund isn't earning) and returns the users, ranked.
    */
-  async topEarnersSince(
-    since: Date,
-    take: number,
-  ): Promise<Array<{ user: User; coins: number }>> {
+  async topEarnersSince(since: Date, take: number): Promise<Array<{ user: User; coins: number }>> {
     const sums = await this.prisma.walletTransaction.groupBy({
       by: ["walletId"],
       where: {
@@ -193,7 +195,7 @@ export class UsersRepository {
     to?: Date;
   }): Promise<[Array<User & { referredBy: User | null }>, number]> {
     const where: Prisma.UserWhereInput = {
-      referredById: { not: null },
+      AND: [{ OR: [{ referredById: { not: null } }, { referredAt: { not: null } }] }],
       ...(params.from || params.to
         ? {
             referredAt: {

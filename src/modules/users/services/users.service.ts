@@ -1,6 +1,12 @@
 import { Prisma, type PrismaClient } from "@prisma/client";
 import type { FastifyInstance } from "fastify";
-import { AppError, ConflictError, ForbiddenError, NotFoundError } from "../../../common/errors.js";
+import {
+  AppError,
+  BadRequestError,
+  ConflictError,
+  ForbiddenError,
+  NotFoundError,
+} from "../../../common/errors.js";
 import type { UsersRepository } from "../repositories/users.repository.js";
 import type { SettingsService } from "../../settings/services/settings.service.js";
 import type { NotificationsService } from "../../notifications/services/notifications.service.js";
@@ -10,6 +16,8 @@ import {
   type PublicUser,
   type UpdateProfileInput,
 } from "../schemas/users.schema.js";
+
+import { readReferralPolicy, type ReferralPolicy } from "./referral-policy.js";
 
 const DEFAULT_RANKS = [
   "Bronze Scout",
@@ -134,7 +142,8 @@ export class UsersService {
     await this.prisma.$transaction(async (tx) => {
       await tx.user.updateMany({
         where: { referredById: userId },
-        data: { referredById: null, referredAt: null },
+        // Preserve the one-time claim marker even if the inviter deletes their account.
+        data: { referredById: null },
       });
       await Promise.all([
         tx.claim.updateMany({ where: { reviewedById: userId }, data: { reviewedById: null } }),
@@ -177,67 +186,139 @@ export class UsersService {
   async applyReferral(
     userId: string,
     code: string,
-  ): Promise<{ applied: true; rewardPoints: number }> {
-    const caller = await this.users.findById(userId);
-    if (!caller) throw new NotFoundError("User not found");
-    if (caller.referredById) throw new ConflictError("A referral code has already been applied");
-
-    const referrer = await this.users.findByReferralCode(code);
+  ): Promise<{
+    applied: true;
+    alreadyApplied: boolean;
+    rewardPoints: number;
+    inviteeRewardPoints: number;
+  }> {
+    const normalized = code.trim().toUpperCase();
+    if (!/^[A-Z0-9]{1,16}$/.test(normalized))
+      throw new BadRequestError("Enter a valid referral code");
+    const referrer = await this.users.findByReferralCode(normalized);
     if (!referrer) throw new NotFoundError("Referral code not found");
-    if (referrer.id === caller.id) {
-      throw new ConflictError("You cannot apply your own referral code");
-    }
+    if (referrer.id === userId) throw new ConflictError("You cannot apply your own referral code");
 
-    const rewardPoints = await this.settings.getNumber("referral.rewardPoints");
+    const result = await this.prisma.$transaction(async (tx) => {
+      // Lock both accounts in deterministic order: concurrent retries, different
+      // codes and reciprocal invitations cannot race eligibility or deletion.
+      const accounts = await tx.$queryRaw<
+        Array<{
+          id: string;
+          name: string;
+          isActive: boolean;
+          referredById: string | null;
+          referredAt: Date | null;
+        }>
+      >`SELECT id, name, "isActive", "referredById", "referredAt"
+          FROM users WHERE id IN (${userId}, ${referrer.id}) ORDER BY id FOR UPDATE`;
+      const caller = accounts.find((u) => u.id === userId);
+      const inviter = accounts.find((u) => u.id === referrer.id);
+      if (!caller) throw new NotFoundError("User not found");
+      if (!caller.isActive) throw new ForbiddenError("This account cannot apply referral codes");
 
-    // Mark the caller referred + credit the referrer atomically. The guarded
-    // updateMany (referredById still null) makes concurrent applies lose the
-    // race and roll back their credit instead of double-crediting.
-    await this.prisma.$transaction(async (tx) => {
+      // A retry after a lost response returns the original receipt, even if an
+      // admin has since changed the amounts or paused the referral programme.
+      if (caller.referredById === referrer.id) {
+        const entries = await tx.walletTransaction.findMany({
+          where: { reference: { in: [`referral:${userId}`, `referral-join:${userId}`] } },
+          select: { reference: true, amount: true },
+        });
+        const amounts = new Map(entries.map((e) => [e.reference, Number(e.amount)]));
+        return {
+          applied: true as const,
+          alreadyApplied: true,
+          rewardPoints: amounts.get(`referral:${userId}`) ?? 0,
+          inviteeRewardPoints: amounts.get(`referral-join:${userId}`) ?? 0,
+        };
+      }
+      if (caller.referredById || caller.referredAt)
+        throw new ConflictError("A referral code has already been applied");
+      if (!inviter || !inviter.isActive)
+        throw new ConflictError("This referral code is no longer available");
+      if (inviter.referredById === caller.id)
+        throw new ConflictError("You cannot exchange referral codes with someone you invited");
+      const policy = await readReferralPolicy(tx);
+      if (!policy.enabled) throw new ConflictError("Referrals are paused. Please try again later");
+
       const marked = await tx.user.updateMany({
-        where: { id: caller.id, referredById: null },
+        where: { id: userId, referredById: null, referredAt: null, isActive: true },
         data: { referredById: referrer.id, referredAt: new Date() },
       });
-      if (marked.count === 0) {
-        throw new ConflictError("A referral code has already been applied");
-      }
+      if (marked.count !== 1) throw new ConflictError("A referral code has already been applied");
 
-      const wallet = await tx.wallet.upsert({
-        where: { userId: referrer.id },
-        create: { userId: referrer.id },
-        update: {},
-      });
-
-      const updated = await tx.wallet.update({
-        where: { id: wallet.id },
-        data: { balance: { increment: rewardPoints } },
-      });
-
-      await tx.walletTransaction.create({
-        data: {
-          walletId: wallet.id,
-          type: "CREDIT",
-          amount: new Prisma.Decimal(rewardPoints),
-          balanceAfter: updated.balance,
-          reference: `referral:${caller.id}`,
-          description: "Referral bonus",
+      const credits = [
+        {
+          userId: referrer.id,
+          amount: policy.rewardPoints,
+          reference: `referral:${userId}`,
+          description: "Friend invitation reward",
         },
-      });
+        {
+          userId,
+          amount: policy.inviteeRewardPoints,
+          reference: `referral-join:${userId}`,
+          description: "Joining referral reward",
+        },
+      ].sort((a, b) => a.userId.localeCompare(b.userId));
+      for (const credit of credits) {
+        const wallet = await tx.wallet.upsert({
+          where: { userId: credit.userId },
+          create: { userId: credit.userId },
+          update: {},
+        });
+        const updated = await tx.wallet.update({
+          where: { id: wallet.id },
+          data: { balance: { increment: credit.amount } },
+        });
+        // Zero-value entries retain the claim's original terms for retries and
+        // admin history; a later reward increase must not change an old claim.
+        await tx.walletTransaction.create({
+          data: {
+            walletId: wallet.id,
+            type: "CREDIT",
+            amount: new Prisma.Decimal(credit.amount),
+            balanceAfter: updated.balance,
+            reference: credit.reference,
+            description: credit.description,
+          },
+        });
+      }
+      return {
+        applied: true as const,
+        alreadyApplied: false,
+        rewardPoints: policy.rewardPoints,
+        inviteeRewardPoints: policy.inviteeRewardPoints,
+      };
     });
 
-    // Best-effort: a Redis outage must not 500 an already-applied referral.
-    try {
-      await this.notifications.enqueue({
-        userId: referrer.id,
-        type: "WALLET",
-        title: "Referral bonus",
-        body: `You earned ${rewardPoints} for inviting ${caller.name}`,
-      });
-    } catch {
-      /* push is best-effort */
+    if (!result.alreadyApplied) {
+      // Notifications are best-effort and never turn a committed reward into
+      // an error that encourages another claim.
+      await Promise.allSettled([
+        ...(result.rewardPoints > 0
+          ? [
+              this.notifications.enqueue({
+                userId: referrer.id,
+                type: "WALLET",
+                title: "Your invitation paid off",
+                body: `A friend joined with your code. ${result.rewardPoints} coins were added to your wallet.`,
+              }),
+            ]
+          : []),
+        ...(result.inviteeRewardPoints > 0
+          ? [
+              this.notifications.enqueue({
+                userId,
+                type: "WALLET",
+                title: "Welcome reward",
+                body: `${result.inviteeRewardPoints} referral coins were added to your wallet.`,
+              }),
+            ]
+          : []),
+      ]);
     }
-
-    return { applied: true, rewardPoints };
+    return result;
   }
 
   /**
@@ -264,24 +345,25 @@ export class UsersService {
 
   /** Sharer-facing referral stats + whether this user already applied a code.
    *  Also backfills a missing referralCode so Share & Earn always has one. */
-  async getReferralStats(
-    userId: string,
-  ): Promise<{
+  async getReferralStats(userId: string): Promise<{
     referralCode: string | null;
     referredCount: number;
     coinsEarned: number;
     hasApplied: boolean;
+    policy: ReferralPolicy;
   }> {
-    const [user, stats] = await Promise.all([
+    const [user, stats, policy] = await Promise.all([
       this.users.findById(userId),
       this.users.referralStats(userId),
+      readReferralPolicy(this.prisma),
     ]);
     if (!user) throw new NotFoundError("User not found");
     const withCode = await this.users.ensureReferralCode(user);
     return {
       ...stats,
       referralCode: withCode.referralCode,
-      hasApplied: withCode.referredById !== null,
+      hasApplied: withCode.referredById !== null || withCode.referredAt !== null,
+      policy,
     };
   }
 }

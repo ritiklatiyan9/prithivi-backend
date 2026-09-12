@@ -25,7 +25,7 @@ export const toPublicUser = (user: User): PublicUser => ({
   role: user.role,
   isActive: user.isActive,
   referralCode: user.referralCode,
-  hasAppliedReferral: user.referredById !== null,
+  hasAppliedReferral: user.referredById !== null || user.referredAt !== null,
   upiId: user.upiId,
   createdAt: user.createdAt.toISOString(),
 });
@@ -49,6 +49,12 @@ export const updateProfileSchema = z.object({
 export type UpdateProfileInput = z.infer<typeof updateProfileSchema>;
 
 export const applyReferralSchema = z.object({
-  code: z.string().trim().min(1).max(16),
+  code: z
+    .string()
+    .trim()
+    .min(1)
+    .max(16)
+    .regex(/^[A-Za-z0-9]+$/, "Use letters and numbers only")
+    .transform((code) => code.toUpperCase()),
 });
 export type ApplyReferralInput = z.infer<typeof applyReferralSchema>;
