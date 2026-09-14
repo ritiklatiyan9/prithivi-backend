@@ -2,6 +2,7 @@ const FIRST_PARTY_WEB_ORIGINS = new Set([
   "https://moneymarathon.in",
   "https://www.moneymarathon.in",
   "https://admin-panel-punia.vercel.app",
+  "https://punia.site",
   "https://www.punia.site",
 ]);
 

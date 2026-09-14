@@ -20,6 +20,7 @@ export default fp(
           callback(null, true);
           return;
         }
+        app.log.warn({ origin }, "rejected CORS origin");
         callback(new Error("Not allowed by CORS"), false);
       },
       credentials: true,

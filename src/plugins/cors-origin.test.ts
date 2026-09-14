@@ -12,6 +12,7 @@ describe("CORS origin allowlist", () => {
   });
 
   it("permits the Punia admin custom domain in production", () => {
+    expect(isCorsOriginAllowed("https://punia.site", "", true)).toBe(true);
     expect(isCorsOriginAllowed("https://www.punia.site", "", true)).toBe(true);
     expect(isCorsOriginAllowed("https://www.punia.site/", "", true)).toBe(true);
   });
@@ -25,6 +26,7 @@ describe("CORS origin allowlist", () => {
   it("rejects lookalike and unconfigured origins in production", () => {
     expect(isCorsOriginAllowed("https://www.moneymarathon.in.evil.test", "", true)).toBe(false);
     expect(isCorsOriginAllowed("https://www.punia.site.evil.test", "", true)).toBe(false);
+    expect(isCorsOriginAllowed("https://punia.site.evil.test", "", true)).toBe(false);
     expect(isCorsOriginAllowed("https://evil.test", "", true)).toBe(false);
     expect(isCorsOriginAllowed("http://localhost:5174", "", true)).toBe(false);
   });
