@@ -20,6 +20,13 @@ export const envBoolean = z.preprocess((value) => {
   }
 }, z.boolean());
 
+// Hosting dashboards commonly persist an intentionally blank optional value
+// as an empty string. Treat that the same as an unset environment variable.
+const optionalUrl = z.preprocess(
+  (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+  z.string().url().optional(),
+);
+
 // Environment-file precedence: .env.<NODE_ENV> first, then .env as fallback.
 // Values already present in process.env (e.g. injected by PM2) always win.
 const nodeEnv = process.env.NODE_ENV ?? "development";
@@ -103,7 +110,7 @@ const envSchema = z.object({
   AWS_S3_BUCKET: z.string().min(3).optional(),
   AWS_S3_REGION: z.string().default("ap-south-1"),
   /** Optional S3-compatible endpoint used only for local/testing providers. */
-  AWS_S3_ENDPOINT: z.string().url().optional(),
+  AWS_S3_ENDPOINT: optionalUrl,
   AWS_S3_FORCE_PATH_STYLE: envBoolean.default(false),
   AWS_S3_KEY_PREFIX: z.string().default("money-marathon"),
   /** Short-lived redirect target; the stable application media URL never expires. */
