@@ -25,9 +25,8 @@ export class WalletService {
    */
   async getMySummary(userId: string): Promise<WalletSummaryDto> {
     const wallet = await this.wallets.ensureForUser(userId);
-    const [credits, withdrawn, pending] = await Promise.all([
-      this.wallets.creditStats(wallet.id),
-      this.wallets.debitTotal(wallet.id),
+    const [ledger, pending] = await Promise.all([
+      this.wallets.ledgerStats(wallet.id),
       this.wallets.pendingRewardsForUser(userId),
     ]);
 
@@ -37,11 +36,11 @@ export class WalletService {
     return {
       balance,
       pendingRewards: pending.toNumber(),
-      lifetimeEarnings: credits.total.toNumber(),
-      totalWithdrawn: withdrawn.toNumber(),
+      lifetimeEarnings: ledger.credited.toNumber(),
+      totalWithdrawn: ledger.withdrawn.toNumber(),
       lockedBalance,
       withdrawableBalance: Math.max(0, balance - lockedBalance),
-      rewardCount: credits.count,
+      rewardCount: ledger.rewardCount,
       updatedAt: wallet.updatedAt.toISOString(),
     };
   }
@@ -51,10 +50,7 @@ export class WalletService {
     query: PaginationQuery,
   ): Promise<{ items: WalletTransactionDto[]; meta: PageMeta }> {
     const wallet = await this.wallets.ensureForUser(userId);
-    const [transactions, total] = await this.wallets.listTransactions(
-      wallet.id,
-      toSkipTake(query),
-    );
+    const [transactions, total] = await this.wallets.listTransactions(wallet.id, toSkipTake(query));
     return {
       items: transactions.map(toWalletTransactionDto),
       meta: buildMeta(query, total),

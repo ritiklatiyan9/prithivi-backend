@@ -40,6 +40,7 @@ export const buildApp = async (): Promise<FastifyInstance> => {
   // Echo the request id so clients/nginx can correlate logs.
   app.addHook("onSend", (request, reply, _payload, done) => {
     reply.header(HEADERS.REQUEST_ID, request.id);
+    reply.header("Server-Timing", `api;dur=${reply.elapsedTime.toFixed(1)}`);
     done();
   });
 

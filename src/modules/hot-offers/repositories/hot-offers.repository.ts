@@ -12,6 +12,7 @@ import type {
   CategoryWithCounts,
   ListOffersQuery,
   OfferWithCategory,
+  OfferCardRecord,
 } from "../schemas/hot-offers.schema.js";
 import type {
   ListSubmissionsQuery,
@@ -34,14 +35,42 @@ const OFFER_INCLUDE = {
   category: { select: { id: true, slug: true, title: true } },
 } as const;
 
+// List requests need card fields, not the large JSON instructions, terms,
+// requirements, proof rules, or long description used only by details.
+const OFFER_CARD_SELECT = {
+  id: true,
+  slug: true,
+  title: true,
+  appName: true,
+  logoUrl: true,
+  thumbnailUrl: true,
+  shortDescription: true,
+  rewardAmount: true,
+  rewardCoins: true,
+  rewardLabel: true,
+  difficulty: true,
+  estimatedTime: true,
+  rating: true,
+  isProduct: true,
+  brandLogoUrl: true,
+  featured: true,
+  trending: true,
+  expiresAt: true,
+  priority: true,
+  status: true,
+  completedBehavior: true,
+  createdAt: true,
+  category: OFFER_INCLUDE.category,
+} as const satisfies Prisma.OfferSelect;
+
 const offerOrderBy = (sort: ListOffersQuery["sort"]): Prisma.OfferOrderByWithRelationInput[] => {
   switch (sort) {
     case "newest":
-      return [{ createdAt: "desc" }];
+      return [{ createdAt: "desc" }, { id: "asc" }];
     case "reward":
-      return [{ rewardAmount: "desc" }, { priority: "desc" }];
+      return [{ rewardAmount: "desc" }, { priority: "desc" }, { id: "asc" }];
     default:
-      return [{ featured: "desc" }, { priority: "desc" }, { createdAt: "desc" }];
+      return [{ featured: "desc" }, { priority: "desc" }, { createdAt: "desc" }, { id: "asc" }];
   }
 };
 
@@ -132,16 +161,24 @@ export class HotOffersRepository {
 
   // ---- offers ----
 
-  async listOffers(
+  private offerWhere(
     query: AdminListOffersQuery,
-    params: { publishedOnly: boolean; hideCompletedFor?: Set<string> },
-  ): Promise<[OfferWithCategory[], number]> {
+    params: { publishedOnly: boolean; hideCompletedFor?: Set<string>; userId?: string },
+  ): Prisma.OfferWhereInput {
     const completedIds = [...(params.hideCompletedFor ?? [])];
     const where: Prisma.OfferWhereInput = {
       deletedAt: null,
       // Drop offers the user completed when the admin picked HIDE for them.
       ...(completedIds.length > 0
         ? { NOT: { completedBehavior: "HIDE" as const, id: { in: completedIds } } }
+        : {}),
+      ...(params.userId
+        ? {
+            NOT: {
+              completedBehavior: "HIDE",
+              submissions: { some: { userId: params.userId, status: "APPROVED" } },
+            },
+          }
         : {}),
       ...(params.publishedOnly
         ? {
@@ -164,6 +201,14 @@ export class HotOffersRepository {
           }
         : {}),
     };
+    return where;
+  }
+
+  async listOffers(
+    query: AdminListOffersQuery,
+    params: { publishedOnly: boolean; hideCompletedFor?: Set<string> },
+  ): Promise<[OfferWithCategory[], number]> {
+    const where = this.offerWhere(query, params);
 
     return Promise.all([
       this.prisma.offer.findMany({
@@ -175,6 +220,41 @@ export class HotOffersRepository {
       }),
       this.prisma.offer.count({ where }),
     ]);
+  }
+
+  async listOfferCards(
+    query: ListOffersQuery,
+    userId?: string,
+  ): Promise<[Array<OfferCardRecord & { completed: boolean }>, number]> {
+    const where = this.offerWhere(query, { publishedOnly: true, userId });
+    const [offers, total] = await Promise.all([
+      this.prisma.offer.findMany({
+        where,
+        select: {
+          ...OFFER_CARD_SELECT,
+          ...(userId
+            ? {
+                submissions: {
+                  where: { userId, status: "APPROVED" as const },
+                  select: { id: true },
+                  take: 1,
+                },
+              }
+            : {}),
+        },
+        orderBy: offerOrderBy(query.sort),
+        skip: (query.page - 1) * query.limit,
+        take: query.limit,
+      }),
+      this.prisma.offer.count({ where }),
+    ]);
+    return [
+      offers.map((offer) => ({
+        ...offer,
+        completed: (offer.submissions?.length ?? 0) > 0,
+      })),
+      total,
+    ];
   }
 
   findOfferById(id: string): Promise<OfferWithCategory | null> {

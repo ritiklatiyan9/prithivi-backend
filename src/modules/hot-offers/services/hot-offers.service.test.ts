@@ -67,7 +67,7 @@ describe("completed-offer personalization", () => {
   it("anonymous requests skip the completion lookup and never set completed", async () => {
     const approvedOfferIds = vi.fn();
     const repo = {
-      listOffers: vi.fn(async () => [[offer], 1]),
+      listOfferCards: vi.fn(async () => [[{ ...offer, completed: false }], 1]),
       approvedOfferIds,
     } as unknown as HotOffersRepository;
     const service = new HotOffersService(repo, {} as NotificationsService, {} as SettingsService);
@@ -77,10 +77,10 @@ describe("completed-offer personalization", () => {
     expect(approvedOfferIds).not.toHaveBeenCalled();
   });
 
-  it("signed-in requests pass completed ids to the repo filter and flag completed cards", async () => {
-    const listOffers = vi.fn(async () => [[offer], 1]);
+  it("signed-in requests use the user-scoped card query and flag completed cards", async () => {
+    const listOfferCards = vi.fn(async () => [[{ ...offer, completed: true }], 1]);
     const repo = {
-      listOffers,
+      listOfferCards,
       approvedOfferIds: vi.fn(async () => new Set([offer.id])),
     } as unknown as HotOffersRepository;
     const service = new HotOffersService(repo, {} as NotificationsService, {} as SettingsService);
@@ -88,10 +88,8 @@ describe("completed-offer personalization", () => {
     const { items } = await service.listPublicOffers(query, "user-1");
     expect(items[0]?.completed).toBe(true);
     expect(items[0]?.completedBehavior).toBe("SHOW_COMPLETED");
-    expect(listOffers).toHaveBeenCalledWith(query, {
-      publishedOnly: true,
-      hideCompletedFor: new Set([offer.id]),
-    });
+    expect(listOfferCards).toHaveBeenCalledWith(query, "user-1");
+    expect(repo.approvedOfferIds).not.toHaveBeenCalled();
   });
 });
 

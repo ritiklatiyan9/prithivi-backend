@@ -8,7 +8,9 @@ export class WalletRepository {
     return this.prisma.wallet.findUnique({ where: { userId } });
   }
 
-  ensureForUser(userId: string): Promise<Wallet> {
+  async ensureForUser(userId: string): Promise<Wallet> {
+    const existing = await this.findByUserId(userId);
+    if (existing) return existing;
     return this.prisma.wallet.upsert({
       where: { userId },
       create: { userId },
@@ -77,6 +79,26 @@ export class WalletRepository {
 
   // ---- derived wallet stats (Module 5) — computed from the ledger so they
   //      can never drift from the source of truth ----
+
+  async ledgerStats(walletId: string): Promise<{
+    credited: Prisma.Decimal;
+    withdrawn: Prisma.Decimal;
+    rewardCount: number;
+  }> {
+    const rows = await this.prisma.walletTransaction.groupBy({
+      by: ["type"],
+      where: { walletId },
+      _sum: { amount: true },
+      _count: { _all: true },
+    });
+    const credits = rows.find((row) => row.type === "CREDIT");
+    const debits = rows.find((row) => row.type === "DEBIT");
+    return {
+      credited: credits?._sum.amount ?? new Prisma.Decimal(0),
+      withdrawn: debits?._sum.amount ?? new Prisma.Decimal(0),
+      rewardCount: credits?._count._all ?? 0,
+    };
+  }
 
   /** Lifetime earnings = sum of all credits; rewardCount = number of credits. */
   async creditStats(walletId: string): Promise<{ total: Prisma.Decimal; count: number }> {

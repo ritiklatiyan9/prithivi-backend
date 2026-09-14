@@ -106,31 +106,29 @@ export class UsersRepository {
    * Top earners since `since`: sums wallet CREDITs per user (refund credits
    * excluded — a refund isn't earning) and returns the users, ranked.
    */
-  async topEarnersSince(since: Date, take: number): Promise<Array<{ user: User; coins: number }>> {
-    const sums = await this.prisma.walletTransaction.groupBy({
-      by: ["walletId"],
-      where: {
-        type: "CREDIT",
-        createdAt: { gte: since },
-        NOT: { reference: { startsWith: "redemption-refund:" } },
-      },
-      _sum: { amount: true },
-      orderBy: { _sum: { amount: "desc" } },
-      take,
-    });
-    if (sums.length === 0) return [];
-
-    const wallets = await this.prisma.wallet.findMany({
-      where: { id: { in: sums.map((s) => s.walletId) } },
-      include: { user: true },
-    });
-    const byWallet = new Map(wallets.map((w) => [w.id, w.user]));
-
-    return sums.flatMap((s) => {
-      const user = byWallet.get(s.walletId);
-      if (!user || !user.isActive) return [];
-      return [{ user, coins: Number(s._sum.amount ?? 0) }];
-    });
+  async topEarnersSince(
+    since: Date,
+    take: number,
+  ): Promise<Array<{ user: Pick<User, "name" | "avatarUrl">; coins: number }>> {
+    // One parameterized query; filter inactive accounts BEFORE the top-N limit.
+    // Select only the public profile fields needed by the podium.
+    const rows = await this.prisma.$queryRaw<
+      Array<{ name: string; avatarUrl: string | null; coins: Prisma.Decimal }>
+    >`
+      SELECT u."name", u."avatarUrl", SUM(t."amount") AS coins
+      FROM "wallet_transactions" t
+      JOIN "wallets" w ON w."id" = t."walletId"
+      JOIN "users" u ON u."id" = w."userId"
+      WHERE t."type" = 'CREDIT' AND t."createdAt" >= ${since}
+        AND u."isActive" = true
+        AND (t."reference" IS NULL OR t."reference" NOT LIKE 'redemption-refund:%')
+      GROUP BY u."id", u."name", u."avatarUrl"
+      ORDER BY coins DESC, u."id" ASC LIMIT ${take}
+    `;
+    return rows.map((row) => ({
+      user: { name: row.name, avatarUrl: row.avatarUrl },
+      coins: Number(row.coins),
+    }));
   }
 
   /** How many users this user referred + the coins credited for them. */

@@ -92,13 +92,9 @@ export class HotOffersService {
       // Personalized: offers the user completed are hidden or flagged per the
       // admin's completedBehavior. Never served from (or stored in) the shared
       // public cache.
-      const completedIds = await this.repo.approvedOfferIds(userId);
-      const [offers, total] = await this.repo.listOffers(query, {
-        publishedOnly: true,
-        hideCompletedFor: completedIds,
-      });
+      const [offers, total] = await this.repo.listOfferCards(query, userId);
       return {
-        items: offers.map((offer) => toOfferCardDto(offer, completedIds.has(offer.id))),
+        items: offers.map((offer) => toOfferCardDto(offer, offer.completed)),
         meta: buildMeta(query, total),
       };
     }
@@ -112,7 +108,7 @@ export class HotOffersService {
       query.product ?? "",
     ])}`;
     return this.cachedPublic(key, async () => {
-      const [offers, total] = await this.repo.listOffers(query, { publishedOnly: true });
+      const [offers, total] = await this.repo.listOfferCards(query);
       return { items: offers.map((offer) => toOfferCardDto(offer)), meta: buildMeta(query, total) };
     });
   }

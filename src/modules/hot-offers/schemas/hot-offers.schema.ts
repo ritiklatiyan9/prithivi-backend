@@ -1,10 +1,5 @@
 import { z } from "zod";
-import type {
-  FeedbackPage,
-  Offer,
-  OfferCategory,
-  Prisma,
-} from "@prisma/client";
+import type { FeedbackPage, Offer, OfferCategory, Prisma } from "@prisma/client";
 
 const contentStatusSchema = z.enum(["DRAFT", "PUBLISHED", "ARCHIVED"]);
 export type ContentStatusValue = z.infer<typeof contentStatusSchema>;
@@ -184,7 +179,34 @@ export type OfferWithCategory = Offer & {
   category: { id: string; slug: string; title: string };
 };
 
-export const toOfferCardDto = (offer: OfferWithCategory, completed = false): OfferCardDto => ({
+export type OfferCardRecord = Pick<
+  OfferWithCategory,
+  | "id"
+  | "slug"
+  | "title"
+  | "appName"
+  | "logoUrl"
+  | "thumbnailUrl"
+  | "shortDescription"
+  | "rewardAmount"
+  | "rewardCoins"
+  | "rewardLabel"
+  | "difficulty"
+  | "estimatedTime"
+  | "rating"
+  | "isProduct"
+  | "brandLogoUrl"
+  | "featured"
+  | "trending"
+  | "expiresAt"
+  | "priority"
+  | "status"
+  | "completedBehavior"
+  | "category"
+  | "createdAt"
+>;
+
+export const toOfferCardDto = (offer: OfferCardRecord, completed = false): OfferCardDto => ({
   id: offer.id,
   slug: offer.slug,
   title: offer.title,
@@ -325,8 +347,22 @@ export interface OfferAnalyticsDto {
     /** downloads / views, 0..1 */
     conversionRate: number;
   };
-  topOffers: { id: string; slug: string; title: string; views: number; clicks: number; downloads: number }[];
-  topCategories: { id: string; slug: string; title: string; views: number; clicks: number; downloads: number }[];
+  topOffers: {
+    id: string;
+    slug: string;
+    title: string;
+    views: number;
+    clicks: number;
+    downloads: number;
+  }[];
+  topCategories: {
+    id: string;
+    slug: string;
+    title: string;
+    views: number;
+    clicks: number;
+    downloads: number;
+  }[];
   series: { bucket: string; views: number; clicks: number; downloads: number }[];
 }
 

@@ -364,6 +364,7 @@ model WalletTransaction {
 
   @@index([walletId, createdAt])
   @@index([walletId, type, createdAt])
+  @@index([type, createdAt])
   @@map("wallet_transactions")
 }
 
@@ -418,6 +419,7 @@ model Notification {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, createdAt])
+  @@index([userId, readAt, createdAt])
   @@map("notifications")
 }
 
@@ -592,6 +594,7 @@ model Offer {
   @@index([categoryId, status, priority])
   @@index([status, featured])
   @@index([status, createdAt])
+  @@index([status, deletedAt, featured(sort: Desc), priority(sort: Desc), createdAt(sort: Desc)], map: "offers_public_feed_idx")
   @@map("offers")
 }
 
