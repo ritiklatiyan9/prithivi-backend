@@ -2,6 +2,7 @@ const FIRST_PARTY_WEB_ORIGINS = new Set([
   "https://moneymarathon.in",
   "https://www.moneymarathon.in",
   "https://admin-panel-punia.vercel.app",
+  "https://www.punia.site",
 ]);
 
 /**
@@ -29,8 +30,8 @@ export const isCorsOriginAllowed = (
   const normalized = normalizeOrigin(origin);
   const configured = new Set(configuredOrigins.split(",").map(normalizeOrigin).filter(Boolean));
 
-  // These are the two canonical public-site hosts. The apex redirects to www,
-  // so both must remain valid even if a Render environment value is stale.
+  // Canonical public website and admin hosts remain valid even when a Render
+  // environment value is stale.
   if (FIRST_PARTY_WEB_ORIGINS.has(normalized) || configured.has(normalized)) {
     return true;
   }

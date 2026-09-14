@@ -11,6 +11,11 @@ describe("CORS origin allowlist", () => {
     expect(isCorsOriginAllowed("https://www.moneymarathon.in", "", true)).toBe(true);
   });
 
+  it("permits the Punia admin custom domain in production", () => {
+    expect(isCorsOriginAllowed("https://www.punia.site", "", true)).toBe(true);
+    expect(isCorsOriginAllowed("https://www.punia.site/", "", true)).toBe(true);
+  });
+
   it("normalizes harmless trailing slashes in configured origins", () => {
     expect(
       isCorsOriginAllowed("https://admin.example.com", "https://admin.example.com/", true),
@@ -19,6 +24,7 @@ describe("CORS origin allowlist", () => {
 
   it("rejects lookalike and unconfigured origins in production", () => {
     expect(isCorsOriginAllowed("https://www.moneymarathon.in.evil.test", "", true)).toBe(false);
+    expect(isCorsOriginAllowed("https://www.punia.site.evil.test", "", true)).toBe(false);
     expect(isCorsOriginAllowed("https://evil.test", "", true)).toBe(false);
     expect(isCorsOriginAllowed("http://localhost:5174", "", true)).toBe(false);
   });
