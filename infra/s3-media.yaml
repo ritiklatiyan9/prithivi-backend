@@ -1,0 +1,66 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Private Money Marathon media bucket and least-privilege backend policy
+
+Parameters:
+  BucketName:
+    Type: String
+    Description: Globally unique S3 bucket name
+  KeyPrefix:
+    Type: String
+    Default: money-marathon
+
+Resources:
+  MediaBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref BucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: AbortIncompleteMultipartUploads
+            Status: Enabled
+            Prefix: ""
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+
+  BackendMediaPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Least-privilege access for the Money Marathon API media prefix
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ListMediaPrefix
+            Effect: Allow
+            Action: s3:ListBucket
+            Resource: !GetAtt MediaBucket.Arn
+            Condition:
+              StringLike:
+                s3:prefix:
+                  - !Sub "${KeyPrefix}/*"
+          - Sid: ManageMediaObjects
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+            Resource: !Sub "${MediaBucket.Arn}/${KeyPrefix}/*"
+
+Outputs:
+  BucketName:
+    Value: !Ref MediaBucket
+  Region:
+    Value: !Ref AWS::Region
+  BackendPolicyArn:
+    Value: !Ref BackendMediaPolicy

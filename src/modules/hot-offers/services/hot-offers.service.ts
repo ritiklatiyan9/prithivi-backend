@@ -8,6 +8,7 @@ import { buildMeta } from "../../../common/pagination.js";
 import type { PageMeta } from "../../../common/response.js";
 import type { NotificationsService } from "../../notifications/services/notifications.service.js";
 import type { SettingsService } from "../../settings/services/settings.service.js";
+import type { UploadsService } from "../../uploads/services/uploads.service.js";
 import type { HotOffersRepository } from "../repositories/hot-offers.repository.js";
 import {
   asJson,
@@ -63,6 +64,7 @@ export class HotOffersService {
     private readonly repo: HotOffersRepository,
     private readonly notifications: NotificationsService,
     private readonly settings: SettingsService,
+    private readonly uploads?: UploadsService,
   ) {}
 
   // ---- public: categories & feedback pages ----
@@ -399,6 +401,11 @@ export class HotOffersService {
   async submitProof(userId: string, input: SubmitProofInput): Promise<SubmissionDto> {
     // Back-compat: a lone screenshotUrl behaves as [screenshotUrl].
     const urls = input.screenshotUrls?.length ? input.screenshotUrls : [input.screenshotUrl!];
+
+    // New managed uploads are tied to their uploader and purpose. Tests and
+    // transitional service construction may omit the dependency, while the
+    // production composition root always supplies it.
+    if (this.uploads) await this.uploads.assertOwnedProofUrls(urls, userId);
 
     const offer = await this.repo.findOfferById(input.offerId);
     if (!offer || offer.status !== "PUBLISHED") throw new NotFoundError("Offer not found");

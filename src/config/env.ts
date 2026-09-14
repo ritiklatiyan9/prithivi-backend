@@ -99,6 +99,15 @@ const envSchema = z.object({
 
   /** cloudinary://<api_key>:<api_secret>@<cloud_name> — falls back to local disk when unset. */
   CLOUDINARY_URL: z.string().optional(),
+  /** Private S3 media bucket. When set, S3 takes precedence over Cloudinary/local storage. */
+  AWS_S3_BUCKET: z.string().min(3).optional(),
+  AWS_S3_REGION: z.string().default("ap-south-1"),
+  /** Optional S3-compatible endpoint used only for local/testing providers. */
+  AWS_S3_ENDPOINT: z.string().url().optional(),
+  AWS_S3_FORCE_PATH_STYLE: envBoolean.default(false),
+  AWS_S3_KEY_PREFIX: z.string().default("money-marathon"),
+  /** Short-lived redirect target; the stable application media URL never expires. */
+  AWS_S3_SIGNED_URL_SECONDS: z.coerce.number().int().min(60).max(3600).default(300),
   UPLOADS_DIR: z.string().default("uploads"),
   UPLOAD_MAX_BYTES: z.coerce
     .number()

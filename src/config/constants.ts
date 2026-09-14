@@ -13,9 +13,11 @@ export const PAGINATION = {
 } as const;
 
 export const UPLOADS = {
-  ALLOWED_MIME_TYPES: ["image/jpeg", "image/png", "image/webp", "image/gif"],
+  ALLOWED_MIME_TYPES: ["image/jpeg", "image/png", "image/webp"],
   PUBLIC_PREFIX: "/uploads",
   CLOUDINARY_FOLDER: "rewardhub",
+  IMAGE_MAX_EDGE: 2_048,
+  WEBP_QUALITY: 88,
 } as const;
 
 export const AUDIT = {

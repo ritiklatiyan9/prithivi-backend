@@ -905,6 +905,35 @@ model AppAsset {
   @@map("app_assets")
 }
 
+/// Every image accepted by POST /uploads. Objects stay private in S3 and are
+/// reached through a stable application URL so proof links never expire and
+/// retired media stops resolving immediately.
+model MediaAsset {
+  id               String    @id @default(uuid())
+  accessToken      String    @unique
+  storageProvider  String
+  objectKey        String
+  sourceUrl        String?
+  purpose          String    @default("PROOF")
+  originalFileName String?
+  mimeType         String
+  byteSize         Int
+  originalByteSize Int
+  width             Int?
+  height            Int?
+  uploadedById     String?
+  status            String    @default("ACTIVE")
+  retiredById      String?
+  retiredAt        DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@index([status, createdAt])
+  @@index([purpose, status, createdAt])
+  @@index([uploadedById, createdAt])
+  @@map("media_assets")
+}
+
 // ---------------------------------------------------------------------------
 // Real-time Ludo
 // ---------------------------------------------------------------------------

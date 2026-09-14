@@ -155,11 +155,12 @@ export const buildContainer = (app: FastifyInstance): Container => {
   );
   const walletService = new WalletService(walletRepository);
   const analyticsService = new AnalyticsService(analyticsRepository);
-  const uploadsService = new UploadsService();
+  const uploadsService = new UploadsService(prisma);
   const hotOffersService = new HotOffersService(
     hotOffersRepository,
     notificationsService,
     settingsService,
+    uploadsService,
   );
   // Providers are resolved per redemption from admin settings (env is the
   // fallback), so credentials can change without a redeploy. Not configured

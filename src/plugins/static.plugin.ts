@@ -13,6 +13,9 @@ import { UPLOADS } from "../config/constants.js";
  * either way.
  */
 export default fp(async (app: FastifyInstance) => {
+  // Managed S3 media is resolved through /api/v1/uploads/:id/content. Do not
+  // expose a stale local upload directory once the private bucket is active.
+  if (env.AWS_S3_BUCKET) return;
   const root = path.resolve(process.cwd(), env.UPLOADS_DIR);
   try {
     mkdirSync(root, { recursive: true });
